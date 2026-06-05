@@ -1,0 +1,22 @@
+[{
+  "case_id": "PLAN_LINEAR_FILE_001",
+  "category": "planning",
+  "difficulty": "MEDIUM",
+  "description": "Multi-step file task - verify LINEAR plan generation",
+  "tags": ["planning", "linear", "file_task"],
+  "input": {
+    "raw_input": "先读取config.json的内容，然后根据配置创建一个output.txt文件",
+    "session_context": null
+  },
+  "expected": {
+    "task_type": "FILE_TASK",
+    "risk_level": "MEDIUM",
+    "plan_mode": "LINEAR",
+    "min_steps": 2,
+    "max_steps": 4,
+    "expected_tools": ["file.read", "file.write"],
+    "success_criteria": ["生成了线性计划", "包含读取和写入步骤"],
+    "golden_output_patterns": []
+  },
+  "evaluation_config": {"methods": ["rule"], "critical_checks": ["plan.mode.is_LINEAR", "plan.steps.at_least_2"]}
+}]

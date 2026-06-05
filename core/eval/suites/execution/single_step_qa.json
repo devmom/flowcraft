@@ -1,0 +1,20 @@
+[{
+  "case_id": "EXEC_QA_SINGLE_001",
+  "category": "execution",
+  "difficulty": "EASY",
+  "description": "Single-step QA execution - verify task completes",
+  "tags": ["execution", "qa", "single_step"],
+  "input": {
+    "raw_input": "1加1等于几？",
+    "session_context": null
+  },
+  "expected": {
+    "task_type": "QA",
+    "risk_level": "LOW",
+    "plan_mode": "DIRECT",
+    "success_criteria": ["给出了正确答案"],
+    "golden_output_patterns": ["2"],
+    "forbidden_patterns": ["不知道"]
+  },
+  "evaluation_config": {"methods": ["rule", "llm_judge"], "critical_checks": ["output.contains_2"]}
+}]

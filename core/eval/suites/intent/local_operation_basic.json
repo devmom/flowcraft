@@ -1,0 +1,20 @@
+[{
+  "case_id": "LOCAL_OP_BASIC_001",
+  "category": "intent",
+  "difficulty": "EASY",
+  "description": "Get current date/time - local operation intent",
+  "tags": ["local_operation", "direct", "low_risk"],
+  "input": {
+    "raw_input": "告诉我现在的日期和时间",
+    "session_context": null
+  },
+  "expected": {
+    "task_type": "QA",
+    "risk_level": "LOW",
+    "plan_mode": "DIRECT",
+    "success_criteria": ["返回了日期和时间"],
+    "golden_output_patterns": ["202", "年", "月", "日"],
+    "forbidden_patterns": ["不知道"]
+  },
+  "evaluation_config": {"methods": ["rule"], "critical_checks": ["output.not_empty"]}
+}]

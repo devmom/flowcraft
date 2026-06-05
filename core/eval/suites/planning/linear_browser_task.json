@@ -1,0 +1,22 @@
+[{
+  "case_id": "PLAN_LINEAR_BROWSER_001",
+  "category": "planning",
+  "difficulty": "MEDIUM",
+  "description": "Browser task with navigation - LINEAR plan with browser tools",
+  "tags": ["planning", "linear", "browser_task"],
+  "input": {
+    "raw_input": "打开example.com，截图保存，然后告诉我页面内容",
+    "session_context": null
+  },
+  "expected": {
+    "task_type": "BROWSER_TASK",
+    "risk_level": "MEDIUM",
+    "plan_mode": "LINEAR",
+    "min_steps": 2,
+    "max_steps": 5,
+    "expected_tools": ["browser.navigate", "browser.screenshot"],
+    "success_criteria": ["包含导航和截图步骤"],
+    "golden_output_patterns": []
+  },
+  "evaluation_config": {"methods": ["rule"], "critical_checks": ["plan.mode.is_LINEAR"]}
+}]

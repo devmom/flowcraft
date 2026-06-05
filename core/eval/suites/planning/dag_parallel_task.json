@@ -1,0 +1,21 @@
+[{
+  "case_id": "PLAN_DAG_PARALLEL_001",
+  "category": "planning",
+  "difficulty": "HARD",
+  "description": "Task with parallelizable steps - should use DAG plan",
+  "tags": ["planning", "dag", "parallel"],
+  "input": {
+    "raw_input": "同时分析file1.txt、file2.txt、file3.txt三个文件的内容，然后汇总结果",
+    "session_context": null
+  },
+  "expected": {
+    "task_type": "FILE_TASK",
+    "risk_level": "LOW",
+    "plan_mode": "LINEAR",
+    "min_steps": 2,
+    "max_steps": 6,
+    "success_criteria": ["包含分析步骤和汇总步骤"],
+    "golden_output_patterns": []
+  },
+  "evaluation_config": {"methods": ["rule"], "critical_checks": ["plan.steps.at_least_2"]}
+}]

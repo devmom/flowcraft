@@ -1,0 +1,1780 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>FlowCraft — Agent Workflow</title>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --bg-secondary: #161b22;
+      --bg-tertiary: #21262d;
+      --border: #30363d;
+      --text: #e6edf3;
+      --text-secondary: #8b949e;
+      --text-muted: #6e7681;
+      --accent: #58a6ff;
+      --accent-dim: #1f6feb;
+      --green: #3fb950;
+      --green-dim: #238636;
+      --amber: #d29922;
+      --amber-bg: rgba(210,153,34,0.15);
+      --red: #f85149;
+      --red-dim: #da3633;
+      --purple: #a371f7;
+      --cyan: #39c5cf;
+      --font: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif;
+      --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: var(--font);
+      background: var(--bg);
+      color: var(--text);
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    /* ── Top bar ─────────────────────── */
+    .topbar {
+      height: 44px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 16px;
+      background: var(--bg-secondary);
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+      -webkit-app-region: drag;
+      user-select: none;
+    }
+    .topbar-left {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 13px;
+      font-weight: 600;
+      letter-spacing: 0.3px;
+    }
+    .topbar-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--green); }
+    .topbar-right { font-size: 12px; color: var(--text-secondary); }
+
+    /* ── Layout ──────────────────────── */
+    .app {
+      display: flex;
+      flex: 1;
+      min-height: 0;
+    }
+
+    /* ── Sidebar ─────────────────────── */
+    .sidebar {
+      width: 280px;
+      min-width: 240px;
+      background: var(--bg-secondary);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .sidebar-header {
+      padding: 12px 16px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--text-muted);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+    }
+    .sidebar-list {
+      flex: 1;
+      overflow-y: auto;
+    }
+    .sidebar-list::-webkit-scrollbar { width: 4px; }
+    .sidebar-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+    .session-item {
+      padding: 10px 16px;
+      cursor: pointer;
+      border-bottom: 1px solid rgba(48,54,61,0.5);
+      transition: background 0.1s;
+    }
+    .session-item:hover { background: var(--bg-tertiary); }
+    .session-item.active { background: var(--bg-tertiary); border-left: 2px solid var(--accent); }
+    .session-title {
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .session-meta {
+      font-size: 11px;
+      color: var(--text-muted);
+      margin-top: 3px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .session-dot {
+      width: 6px; height: 6px; border-radius: 50%; display: inline-block;
+    }
+    .session-dot.ok { background: var(--green); }
+    .session-dot.warn { background: var(--amber); }
+    .session-dot.err { background: var(--red); }
+    .session-dot.run { background: var(--accent); }
+
+    /* ── Main chat area ──────────────── */
+    .chat {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+      background: var(--bg);
+    }
+
+    /* Conversation */
+    .conversation {
+      flex: 1;
+      overflow-y: auto;
+      padding: 16px 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .conversation::-webkit-scrollbar { width: 6px; }
+    .conversation::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+    .msg {
+      padding: 8px 12px;
+      border-radius: 6px;
+      font-size: 13px;
+      line-height: 1.55;
+      animation: fadeIn 0.2s ease;
+    }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+
+    .msg-user { background: var(--bg-tertiary); border: 1px solid var(--border); }
+    .msg-system { color: var(--text-secondary); font-size: 12px; border-left: 2px solid var(--border); border-radius: 0; }
+    .msg-tool { background: rgba(88,166,255,0.06); border: 1px solid rgba(88,166,255,0.2); }
+    .msg-result { background: rgba(63,185,80,0.06); border: 1px solid rgba(63,185,80,0.2); }
+    .msg-error { background: rgba(248,81,73,0.08); border: 1px solid rgba(248,81,73,0.2); }
+    .msg-output { background: var(--bg-secondary); border: 2px solid var(--accent); }
+    .msg-approval { background: var(--amber-bg); border: 1px solid rgba(210,153,34,0.4); }
+
+    .msg-header {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-bottom: 4px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+    }
+    .msg-header .dot { width: 7px; height: 7px; border-radius: 50%; }
+    .dot.cyan { background: var(--cyan); }
+    .dot.amber { background: var(--amber); }
+    .dot.green { background: var(--green); }
+    .dot.red { background: var(--red); }
+    .dot.blue { background: var(--accent); }
+    .dot.purple { background: var(--purple); }
+
+    .msg-body { color: var(--text); }
+    .msg-body pre {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 10px 12px;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      line-height: 1.5;
+      margin-top: 6px;
+      overflow-x: auto;
+      white-space: pre-wrap;
+      word-break: break-all;
+      color: var(--text-secondary);
+      max-height: 360px;
+      overflow-y: auto;
+    }
+    .msg-body pre::-webkit-scrollbar { width: 4px; height: 4px; }
+    .msg-body pre::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+    .session-del {
+      background: none; border: none; color: var(--text-muted);
+      cursor: pointer; font-size: 16px; padding: 2px 6px; opacity: 0;
+      transition: opacity 0.15s, color 0.15s; line-height: 1;
+      border-radius: 3px;
+    }
+    .session-del:hover { color: var(--red); background: rgba(248,81,73,0.15); }
+
+    .msg-time {
+      font-size: 10px;
+      color: var(--text-muted);
+      margin-left: auto;
+      font-weight: 400;
+    }
+
+    /* Thinking / status text */
+    .thinking { color: var(--text-secondary); font-style: italic; font-size: 12px; }
+
+    /* Empty state */
+    .empty-state {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      color: var(--text-muted);
+      gap: 8px;
+    }
+    .empty-icon { font-size: 40px; opacity: 0.3; }
+
+    /* ── Input area ──────────────────── */
+    .input-wrapper {
+      border-top: 1px solid var(--border);
+      background: var(--bg-secondary);
+      flex-shrink: 0;
+    }
+    .input-area {
+      padding: 12px 16px 12px 16px;
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+    .input-area #taskInput {
+      flex: 1;
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 10px 14px;
+      color: var(--text);
+      font-family: var(--font-mono);
+      font-size: 13px;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    .input-area #taskInput:focus { border-color: var(--accent-dim); }
+    .input-area #taskInput::placeholder { color: var(--text-muted); }
+
+    #createBtn {
+      background: var(--green-dim);
+      border: 0;
+      border-radius: 6px;
+      color: white;
+      padding: 10px 18px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: background 0.15s;
+    }
+    #createBtn:hover { background: var(--green); }
+    #createBtn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    #uploadBtn {
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text-secondary);
+      width: 40px;
+      height: 40px;
+      font-size: 22px;
+      font-weight: 400;
+      line-height: 1;
+      cursor: pointer;
+      transition: all 0.15s;
+      position: relative;
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    #uploadBtn:hover { background: var(--border); color: var(--text); }
+    #uploadBtn.has-files { color: var(--accent); border-color: var(--accent-dim); }
+    #uploadBtn .badge {
+      position: absolute; top: -6px; right: -6px;
+      background: var(--accent); color: #fff; font-size: 10px;
+      min-width: 17px; height: 17px; border-radius: 10px;
+      display: flex; align-items: center; justify-content: center;
+      font-weight: 700;
+    }
+    #uploadInput { display: none; }
+
+    #modelSelect {
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text-secondary);
+      padding: 10px 8px;
+      font-size: 12px;
+      cursor: pointer;
+      outline: none;
+      width: 130px;
+      flex-shrink: 0;
+    }
+
+    /* Uploaded file chips */
+    .file-chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      padding: 0 16px 8px 16px;
+    }
+    .file-chips:empty { padding: 0; }
+    .file-chip {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 4px 10px;
+      font-size: 12px;
+      color: var(--text);
+      max-width: 220px;
+      animation: fadeIn 0.2s ease;
+    }
+    .file-chip img.preview {
+      width: 28px; height: 28px;
+      object-fit: cover;
+      border-radius: 3px;
+      border: 1px solid var(--border);
+    }
+    .file-chip .chip-name {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      max-width: 100px;
+    }
+    .file-chip .chip-size {
+      color: var(--text-muted);
+      font-size: 10px;
+      white-space: nowrap;
+    }
+    .file-chip .chip-remove {
+      background: none; border: none;
+      color: var(--text-muted); cursor: pointer;
+      font-size: 14px; line-height: 1; padding: 0 2px;
+      transition: color 0.15s;
+    }
+    .file-chip .chip-remove:hover { color: var(--red); }
+    .file-chip.uploading { opacity: 0.5; border-style: dashed; }
+    .file-chip .chip-spinner {
+      width: 14px; height: 14px;
+      border: 2px solid var(--border);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+    }
+
+    /* Drag & drop highlight */
+    .drag-over .input-area {
+      background: rgba(88,166,255,0.06);
+    }
+
+    /* Waiting indicator */
+    .waiting {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+    }
+    .spinner {
+      width: 14px; height: 14px;
+      border: 2px solid var(--border);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Responsive */
+    @media (max-width: 700px) {
+      .sidebar { display: none; }
+    }
+  </style>
+</head>
+<body>
+<div class="topbar">
+  <div class="topbar-left">
+    <span class="topbar-dot" id="statusDot"></span>
+    <span>FlowCraft</span>
+  </div>
+  <div class="topbar-right" style="display:flex;align-items:center;gap:12px;">
+    <span id="healthText" style="font-size:12px;color:var(--text-secondary);">connecting...</span>
+    <button onclick="openKBSearch()" style="background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:14px;" title="Knowledge Base">&#128218;</button>
+    <button onclick="openWorkflowList()" style="background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:16px;" title="Workflow List">📦</button>
+    <button onclick="openSettings()" style="background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:16px;" title="设置">⚙</button>
+  </div>
+</div>
+
+<div class="app">
+  <!-- Sidebar: session list -->
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <span>会话历史</span>
+      <div style="display:flex;gap:4px;">
+        <button onclick="newSession()" style="background:none;border:1px solid var(--border);color:var(--text-secondary);cursor:pointer;font-size:14px;width:24px;height:24px;border-radius:4px;display:flex;align-items:center;justify-content:center;" title="新建会话">+</button>
+        <button onclick="refreshSelected()" style="background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:14px;" title="刷新">↻</button>
+      </div>
+    </div>
+    <div class="sidebar-list" id="taskList">
+      <div style="padding:24px;text-align:center;color:var(--text-muted);font-size:12px;">暂无会话</div>
+    </div>
+  </aside>
+
+  <!-- Main: conversation + input -->
+  <main class="chat">
+    <div class="conversation" id="conversation">
+      <div class="empty-state">
+        <div class="empty-icon">⚡</div>
+        <div style="font-size:15px;font-weight:500;">FlowCraft Agent</div>
+        <div style="font-size:12px;">在下方输入任务，Agent 将自动规划并执行</div>
+        <div style="font-size:11px;color:var(--text-muted);margin-top:8px;">
+          试试：读取 D:/work/FlowCraft/README.md<br>
+          或：执行命令 dir /b 查看项目文件
+        </div>
+      </div>
+    </div>
+
+    <div class="input-wrapper" id="inputWrapper">
+      <div id="buildModeBar" style="display:none;background:rgba(88,166,255,0.1);border-bottom:1px solid rgba(88,166,255,0.2);padding:6px 16px;font-size:11px;color:var(--accent);display:none;align-items:center;justify-content:space-between;">
+        <span>🏗 工作流构建模式 — Agent 正在引导你创建自动化流程</span>
+        <button onclick="cancelWfBuild()" style="background:none;border:1px solid var(--border);border-radius:3px;color:var(--text-muted);cursor:pointer;font-size:10px;padding:2px 8px;">退出</button>
+      </div>
+      <div class="file-chips" id="fileChips"></div>
+      <div class="input-area" id="inputArea">
+        <input type="text" id="taskInput" placeholder="描述你的任务... 支持拖拽上传文件"
+               autocomplete="off" />
+        <input type="file" id="uploadInput" multiple
+               accept="image/*,.pdf,.docx,.xlsx,.pptx,.txt,.md,.csv,.json,.py,.js,.html,.css,.zip,.log"
+               onchange="handleFileSelect(event)" />
+        <button class="btn-upload" id="uploadBtn" onclick="document.getElementById('uploadInput').click()" title="上传文件">+</button>
+        <select id="modelSelect">
+          <optgroup label="DeepSeek">
+            <option value="deepseek-v4-pro">DeepSeek V4 Pro</option>
+            <option value="deepseek-v4-flash">DeepSeek V4 Flash</option>
+          </optgroup>
+          <optgroup label="Agnes AI (Free)">
+            <option value="agnes-2.0-flash">Agnes 2.0 Flash</option>
+            <option value="agnes-1.5-flash">Agnes 1.5 Flash</option>
+          </optgroup>
+        </select>
+        <button id="createBtn" onclick="createTask()">▶ 运行</button>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script>
+    const $ = (s) => document.querySelector(s);
+  const inputEl = $("#taskInput");
+  const createBtn = $("#createBtn");
+  const modelSelect = $("#modelSelect");
+  const convEl = $("#conversation");
+  const taskListEl = $("#taskList");
+  const healthText = $("#healthText");
+  const statusDot = $("#statusDot");
+
+  let sessions = [];
+  let activeTaskId = null;
+  let activeSessionId = null;  // 当前选中会话的 session_id，用于会话连续性
+  let pollTimer = null;
+
+  // ── Persist model preference ──────────────────────────────
+  const savedModel = localStorage.getItem("flowcraft-model") || "deepseek-v4-pro";
+  modelSelect.value = savedModel;
+  modelSelect.addEventListener("change", () => {
+    localStorage.setItem("flowcraft-model", modelSelect.value);
+  });
+
+  // ── Event → Message mapping ──────────────────────────────
+  const EVENT_STYLE = {
+    "task.created":     { cls: "msg-system",  dot: "cyan",   label: "TASK" },
+    "intent.recognized":{ cls: "msg-system",  dot: "purple", label: "INTENT" },
+    "plan.created":     { cls: "msg-system",  dot: "purple", label: "PLAN" },
+    "policy.checked":   { cls: "msg-system",  dot: "purple", label: "POLICY" },
+    "execution.started":{ cls: "msg-system",  dot: "blue",   label: "EXEC" },
+    "step.started":     { cls: "msg-system",  dot: "blue",   label: "STEP" },
+    "step.reasoning":   { cls: "msg-system",  dot: "amber",  label: "THINK" },
+    "step.answer":      { cls: "msg-output",  dot: "green",  label: "ANSWER" },
+    "step.completed":   { cls: "msg-system",  dot: "green",  label: "DONE" },
+    "tool.requested":   { cls: "msg-tool",    dot: "blue",   label: "TOOL" },
+    "tool.completed":   { cls: "msg-result",  dot: "green",  label: "RESULT" },
+    "task.completed":   { cls: "msg-output",  dot: "green",  label: "COMPLETE" },
+    "task.failed":      { cls: "msg-error",   dot: "red",    label: "ERROR" },
+    "step.failed":      { cls: "msg-error",   dot: "red",    label: "ERROR" },
+    "approval.requested":{cls: "msg-approval",dot: "amber",  label: "APPROVAL" },
+    "iteration.started": {cls: "msg-system",  dot: "purple", label: "ITER" },
+    "iteration.completed":{cls:"msg-system",  dot: "green",  label: "ITER-DONE" },
+    "dag.parallel":      {cls: "msg-system",  dot: "blue",   label: "DAG" },
+    "plan.replanned":    {cls: "msg-system",  dot: "amber",  label: "REPLAN" },
+  };
+
+  function eventStyle(et) {
+    return EVENT_STYLE[et] || { cls: "msg-system", dot: "cyan", label: et };
+  }
+
+  function statusDotClass(status) {
+    if (status === "COMPLETED") return "ok";
+    if (status === "WAITING_APPROVAL") return "warn";
+    if (status === "FAILED") return "err";
+    if (status === "EXECUTING") return "run";
+    return "";
+  }
+
+  // ── Render Conversation ───────────────────────────────────
+  function renderConversation(events, taskStatus, taskId) {
+    const isComplete = taskStatus === "COMPLETED" || taskStatus === "FAILED" || taskStatus === "CANCELLED"
+  const isPaused = taskStatus === "PAUSED"
+  const hasTerminalEvent = events.some(e => e.event_type === "task.completed" || e.event_type === "task.failed" || e.event_type === "task.cancelled")
+  const forceComplete = isComplete || hasTerminalEvent;
+
+    if (events.length === 0 && !forceComplete) {
+      const txt = isPaused ? "任务已暂停" : "Agent 工作中...";
+      const sp = isPaused ? "" : `<div class="spinner"></div>`;
+      convEl.innerHTML = `<div class="waiting">${sp}<span style="color:var(--text-secondary);font-size:13px;">${txt}</span></div>`;
+      return;
+    }
+
+    let html = "";
+
+    // 显示当前会话的任务标题
+    const activeSession = sessions.find(s => s.task_id === taskId);
+    if (activeSession) {
+      const displayTitle = activeSession.display_title || activeSession.title;
+      html += `<div style="text-align:center;padding:8px 0 16px;color:var(--text-muted);font-size:11px;border-bottom:1px solid var(--border);margin-bottom:8px;">${esc(displayTitle)}</div>`;
+    }
+
+    for (const e of events) {
+      const st = eventStyle(e.event_type);
+      const time = formatTime(e.created_at);
+      const msg = e.message || "";
+
+      // ── User message: show task.created as user bubble ──
+      if (e.event_type === "task.created") {
+        html += `<div class="msg msg-user" style="margin:8px 0;">
+          <div class="msg-header"><span class="dot" style="background:var(--accent);"></span>你<span class="msg-time">${time}</span></div>
+          <div class="msg-body"><pre>${esc(msg)}</pre></div>
+        </div>`;
+      }
+      // ── Workflow Builder activation ──
+      else if (e.event_type === "workflow.builder.activated") {
+        const payload = e.payload || {};
+        const agentMsg = payload.agent_message || msg || "已进入工作流构建模式";
+        html += `<div class="msg msg-system" style="margin:8px 0;">
+          <div class="msg-header"><span class="dot purple"></span>AGENT<span class="msg-time">${time}</span></div>
+          <div class="msg-body" style="white-space:pre-wrap;">${esc(agentMsg)}</div>
+        </div>`;
+      }
+      // ── Progress updates: show as status messages ──
+      else if (e.event_type === "progress.update") {
+        html += `<div style="padding:4px 12px;color:var(--text-muted);font-size:12px;font-style:italic;">${esc(msg)}</div>`;
+      }
+      // ── Step answers & task completion ──
+      else if (e.event_type === "step.answer" || e.event_type === "task.completed") {
+        const output = e.payload?.output || msg;
+        html += `<div class="msg ${st.cls}">
+          <div class="msg-header"><span class="dot ${st.dot}"></span>${st.label}<span class="msg-time">${time}</span></div>
+          <div class="msg-body"><pre>${esc(output)}</pre></div>
+        </div>`;
+      } else if (e.event_type === "tool.completed") {
+        const payload = e.payload || {};
+        const output = payload.output || {};
+        const detail = Object.keys(output).length
+          ? JSON.stringify(output, null, 2).substring(0, 800)
+          : JSON.stringify(payload, null, 2).substring(0, 500);
+        html += `<div class="msg ${st.cls}">
+          <div class="msg-header"><span class="dot ${st.dot}"></span>${st.label}<span class="msg-time">${time}</span></div>
+          <div class="msg-body">${esc(msg)}<pre>${esc(detail)}</pre></div>
+        </div>`;
+      } else if (e.event_type === "approval.requested") {
+        html += `<div class="msg ${st.cls}">
+          <div class="msg-header"><span class="dot ${st.dot}"></span>${st.label}<span class="msg-time">${time}</span></div>
+          <div class="msg-body">
+            <p>${esc(msg)}</p>
+            <div style="margin-top:8px;display:flex;gap:6px;">
+              <button onclick="approveTask('${esc(taskId)}')" style="background:var(--green-dim);border:0;border-radius:4px;color:#fff;padding:6px 14px;cursor:pointer;font-size:12px;">批准执行</button>
+              <button onclick="cancelTask('${esc(taskId)}')" style="background:var(--red-dim);border:0;border-radius:4px;color:#fff;padding:6px 14px;cursor:pointer;font-size:12px;">取消</button>
+            </div>
+          </div>
+        </div>`;
+      } else if (e.event_type === "task.failed" || e.event_type === "step.failed") {
+        html += `<div class="msg ${st.cls}">
+          <div class="msg-header"><span class="dot ${st.dot}"></span>${st.label}<span class="msg-time">${time}</span></div>
+          <div class="msg-body">${esc(msg)}</div>
+        </div>`;
+      } else {
+        html += `<div class="msg ${st.cls}">
+          <div class="msg-header"><span class="dot ${st.dot}"></span>${st.label}<span class="msg-time">${time}</span></div>
+          <div class="msg-body">${esc(msg)}</div>
+        </div>`;
+      }
+    }
+
+    if (!forceComplete && events.length > 0) {
+      if (isPaused) {
+        html += `<div class="waiting"><span style="color:var(--amber);font-size:13px;">⏯ 任务已暂停 — 点击"继续"恢复执行</span></div>`;
+      } else {
+        html += `<div class="waiting"><div class="spinner"></div><span style="color:var(--text-secondary);font-size:13px;">Agent 工作中...</span></div>`;
+      }
+    }
+
+    convEl.innerHTML = html || `<div class="empty-state"><div class="empty-icon">⚡</div><div>等待任务结果...</div></div>`;
+    convEl.scrollTop = convEl.scrollHeight;
+  }
+
+  // ── Sidebar ───────────────────────────────────────────────
+  function renderSidebar() {
+    if (sessions.length === 0) {
+      taskListEl.innerHTML = `<div style="padding:24px;text-align:center;color:var(--text-muted);font-size:12px;">暂无会话<br><span style="font-size:11px;">在下方输入任务开始</span></div>`;
+      return;
+    }
+    taskListEl.innerHTML = sessions.map(s => {
+      const dot = statusDotClass(s.status);
+      const sid = s.session_id || s.task_id;
+      const isActive = sid === activeSessionId;
+      const title = s.display_title || s.title;
+      return `<div class="session-item${isActive ? ' active' : ''}" data-sid="${esc(sid)}" data-tid="${esc(s.task_id)}">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;">
+          <div style="flex:1;min-width:0;">
+            <div class="session-title" data-sid="${esc(sid)}" ondblclick="renameSession('${esc(sid)}')" title="双击修改标题">${esc(title)}</div>
+            <div class="session-meta">
+              <span class="session-dot ${dot}"></span>${statusLabel(s.status)}
+              <span style="margin-left:auto;">${relativeTime(s.created_at)}</span>
+            </div>
+          </div>
+          <div style="display:flex;gap:2px;">
+            <button class="session-rename" data-sid="${esc(sid)}" title="重命名" style="background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:12px;opacity:0;padding:2px 4px;">✎</button>
+            <button class="session-del" data-sid="${esc(sid)}" title="删除">×</button>
+          </div>
+        </div>
+      </div>`;
+    }).join("");
+
+    taskListEl.querySelectorAll(".session-item").forEach(el => {
+      el.addEventListener("click", (e) => {
+        if (e.target.classList.contains("session-del")) return;
+        selectSession(el.dataset.sid, el.dataset.tid);
+      });
+      el.addEventListener("mouseenter", () => { el.querySelector(".session-del").style.opacity = "1"; });
+      el.addEventListener("mouseleave", () => { el.querySelector(".session-del").style.opacity = "0"; });
+    });
+
+    taskListEl.querySelectorAll(".session-del").forEach(btn => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        deleteSession(btn.dataset.sid);
+      });
+    });
+
+    // Rename button handlers
+    taskListEl.querySelectorAll(".session-rename").forEach(btn => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        renameSession(btn.dataset.sid);
+      });
+    });
+    taskListEl.querySelectorAll(".session-item").forEach(el => {
+      el.addEventListener("mouseenter", () => {
+        const renameBtn = el.querySelector(".session-rename");
+        if (renameBtn) renameBtn.style.opacity = "1";
+      });
+      el.addEventListener("mouseleave", () => {
+        const renameBtn = el.querySelector(".session-rename");
+        if (renameBtn) renameBtn.style.opacity = "0";
+      });
+    });
+  }
+
+  function renameSession(sid) {
+    const session = sessions.find(s => (s.session_id||s.task_id) === sid);
+    const currentTitle = sessionTitles[sid] || session?.first_title || session?.title || '';
+    const newTitle = prompt("修改会话标题:", currentTitle);
+    if (newTitle && newTitle.trim() && newTitle.trim() !== currentTitle) {
+      sessionTitles[sid] = newTitle.trim();
+      saveSessionTitles();
+      renderSidebar();
+    }
+  }
+
+  function statusLabel(s) {
+    const m = { COMPLETED:"完成", FAILED:"失败", WAITING_APPROVAL:"待审批", EXECUTING:"执行中",
+      PLANNED:"已规划", INTENT_RECOGNIZED:"已识别", CANCELLED:"已取消", PAUSED:"已暂停" };
+    return m[s] || s;
+  }
+
+  // ── Session Management ────────────────────────────────────
+  function newSession() {
+    activeTaskId = null;
+    activeSessionId = null;
+    stopPoll();
+    stopSSE();
+    streamedEvents = [];
+    convEl.innerHTML = `<div class="empty-state"><div class="empty-icon">⚡</div><div style="font-size:15px;font-weight:500;">FlowCraft Agent</div><div style="font-size:12px;">在下方输入任务开始新会话</div></div>`;
+    inputEl.value = "";
+    inputEl.placeholder = "描述你的任务...";
+    renderSidebar();
+  }
+
+  async function deleteSession(sessionId) {
+    if (!confirm("删除此会话？")) return;
+    try {
+      await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" });
+      if (activeSessionId === sessionId) newSession();
+      await loadSessions();
+    } catch (err) {
+      alert("删除失败: " + err.message);
+    }
+  }
+
+  async function selectSession(sessionId, taskId) {
+    activeSessionId = sessionId;
+    activeTaskId = taskId;
+    inputEl.placeholder = "继续对话... (Enter 发送)";
+    stopPoll();
+    stopSSE();
+    streamedEvents = [];
+    convEl.innerHTML = `<div class="waiting"><div class="spinner"></div><span style="color:var(--text-secondary);font-size:13px;">加载中...</span></div>`;
+    await loadSessionEvents(sessionId, taskId);
+    renderSidebar();
+  }
+
+  async function loadSessionEvents(sessionId, latestTaskId) {
+    try {
+      // 加载会话下所有任务的聚合事件
+      const [eventsRes, taskRes] = await Promise.all([
+        fetch(`/api/sessions/${encodeURIComponent(sessionId)}/events`),
+        fetch(`/api/tasks/${latestTaskId}`)
+      ]);
+      const eventsData = await eventsRes.json();
+      const taskData = await taskRes.json();
+      const task = taskData.task || {};
+      const allEvents = eventsData.events || [];
+
+      renderConversation(allEvents, task.status, latestTaskId);
+
+      if (["COMPLETED", "FAILED", "CANCELLED", "PAUSED"].includes(task.status)) {
+        stopPoll();
+      }
+    } catch (err) {
+      convEl.innerHTML = `<div class="msg msg-error"><div class="msg-body">加载失败: ${esc(err.message)}</div></div>`;
+    }
+  }
+
+  async function loadTaskData(taskId) {
+    try {
+      const [taskRes, eventsRes] = await Promise.all([
+        fetch(`/api/tasks/${taskId}`),
+        fetch(`/api/tasks/${taskId}/events`)
+      ]);
+      const taskData = await taskRes.json();
+      const eventsData = await eventsRes.json();
+      const task = taskData.task || {};
+
+      renderConversation(eventsData.events || [], task.status, taskId);
+
+      if (task.status === "COMPLETED" || task.status === "FAILED" || task.status === "CANCELLED") {
+        stopPoll();
+      }
+    } catch (err) {
+      convEl.innerHTML = `<div class="msg msg-error"><div class="msg-body">加载失败: ${esc(err.message)}</div></div>`;
+    }
+  }
+
+  // ── Task Creation (with session continuity) ───────────────
+  async function createTask() {
+    const text = inputEl.value.trim();
+    if (!text) return;
+    createBtn.disabled = true;
+    createBtn.textContent = "...";
+
+    try {
+      const sessionId = activeSessionId || ("session_" + Date.now());
+
+      const res = await fetch("/api/tasks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json; charset=utf-8" },
+        body: JSON.stringify({ session_id: sessionId, input: text })
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const task = await res.json();
+
+      activeTaskId = task.task_id;
+      activeSessionId = sessionId;
+      inputEl.value = "";
+      inputEl.placeholder = "继续对话... (Enter 发送)";
+
+      // Stop any SSE from previous task to prevent cross-contamination
+      stopSSE();
+      stopPoll();
+      streamedEvents = [];
+
+      // Immediately show user's message before loading events
+      showUserMessage(text);
+
+      // Load existing events + start streaming
+      await loadSessionEvents(sessionId, task.task_id);
+      await loadSessions();
+
+      if (!["COMPLETED", "FAILED", "CANCELLED", "PAUSED"].includes(task.status)) {
+        startSSE(task.task_id);
+      }
+    } catch (err) {
+      convEl.innerHTML = `<div class="msg msg-error"><div class="msg-header"><span class="dot red"></span>ERROR</div><div class="msg-body">创建失败: ${esc(err.message)}</div></div>`;
+    } finally {
+      createBtn.disabled = false;
+      createBtn.textContent = "▶ 运行";
+    }
+  }
+
+  function showUserMessageBubble(text) {
+    const time = new Date().toLocaleTimeString();
+    const bubble = `<div class="msg msg-user" style="margin:8px 0;">
+      <div class="msg-header"><span class="dot" style="background:var(--accent);"></span>你<span class="msg-time">${time}</span></div>
+      <div class="msg-body"><pre>${esc(text)}</pre></div>
+    </div>`;
+    if (!convEl.innerHTML || convEl.innerHTML.includes('empty-state')) {
+      convEl.innerHTML = bubble;
+    } else {
+      convEl.innerHTML += bubble;
+    }
+    convEl.scrollTop = convEl.scrollHeight;
+  }
+
+  function showUserMessage(text) {
+    // Append user message bubble to current conversation content
+    const time = new Date().toLocaleTimeString();
+    const bubble = `<div class="msg msg-user" style="margin:8px 0;">
+      <div class="msg-header"><span class="dot" style="background:var(--accent);"></span>你<span class="msg-time">${time}</span></div>
+      <div class="msg-body"><pre>${esc(text)}</pre></div>
+    </div>`;
+    // If conversation is empty or has empty-state, replace it
+    if (!convEl.innerHTML || convEl.innerHTML.includes('empty-state')) {
+      convEl.innerHTML = bubble + `<div class="waiting"><div class="spinner"></div></div>`;
+    } else {
+      // Insert before any existing waiting spinner
+      const spinner = convEl.querySelector('.waiting');
+      if (spinner) {
+        spinner.insertAdjacentHTML('beforebegin', bubble);
+      } else {
+        convEl.innerHTML += bubble;
+      }
+    }
+    convEl.scrollTop = convEl.scrollHeight;
+  }
+
+  // ── SSE Streaming ─────────────────────────────────────────
+  let sseSource = null;
+
+  function startSSE(taskId) {
+    stopSSE();
+    // Clear accumulated events from previous task
+    streamedEvents = [];
+    const evtSource = new EventSource(`/api/stream/${taskId}/events`);
+    sseSource = evtSource;
+    let eventCount = 0;
+
+    evtSource.onmessage = (e) => {
+      try {
+        const ev = JSON.parse(e.data);
+        eventCount++;
+        // Update conversation in real-time
+        if (activeTaskId === taskId) {
+          streamUpdateConversation(ev, taskId);
+        }
+        // On terminal event, stop streaming and refresh
+        if (ev.event_type === "task.completed" || ev.event_type === "task.failed" || ev.event_type === "task.cancelled") {
+          stopSSE();
+          loadSessions();
+          // Final refresh to ensure all events are captured
+          if (activeSessionId) {
+            loadSessionEvents(activeSessionId, taskId);
+          }
+        }
+        // If SSE seems dead (>10s no events on an active task), fallback to polling
+      } catch (err) { /* skip malformed */ }
+    };
+
+    evtSource.onerror = () => {
+      stopSSE();
+      // Only fallback to polling if task is NOT already completed
+      if (activeTaskId === taskId) {
+        const lastEv = streamedEvents[streamedEvents.length - 1];
+        const alreadyDone = lastEv && (lastEv.event_type === "task.completed" || lastEv.event_type === "task.failed" || lastEv.event_type === "task.cancelled");
+        if (!alreadyDone) {
+          startPoll(taskId);
+        } else {
+          loadSessions(); // refresh sidebar only
+        }
+      }
+    };
+  }
+
+  function stopSSE() {
+    if (sseSource) { sseSource.close(); sseSource = null; }
+  }
+
+  // In-memory event cache for streaming updates
+  let streamedEvents = [];
+
+  function streamUpdateConversation(newEvent, taskId) {
+    // Deduplicate: skip if event already exists (SSE replays old events)
+    if (streamedEvents.some(e => e.event_id === newEvent.event_id)) return;
+    streamedEvents.push(newEvent);
+
+    // ── Auto-detect workflow builder activation ──
+    if (newEvent.event_type === "workflow.builder.activated") {
+      const payload = newEvent.payload || {};
+      const sid = payload.builder_session_id || "";
+      if (sid) {
+        wfBuildSession = sid;
+        document.getElementById("buildModeBar").style.display = "flex";
+        inputEl.placeholder = "描述你的工作流细节...";
+        createBtn.textContent = "▶ 继续";
+        console.log("[WF Builder] Auto-activated from SSE event, session:", sid);
+      }
+    }
+
+    // Re-render with all accumulated events
+    const isComplete = newEvent.event_type === "task.completed" || newEvent.event_type === "task.failed" || newEvent.event_type === "task.cancelled";
+    const isApproval = newEvent.event_type === "approval.requested" || streamedEvents.some(e => e.event_type === "approval.requested");
+    const status = isComplete ? "COMPLETED" : isApproval ? "WAITING_APPROVAL" : "EXECUTING";
+    renderConversation(streamedEvents, status, taskId);
+  }
+
+  // ── Polling (fallback) ────────────────────────────────────
+  function startPoll(taskId) {
+    stopPoll();
+    pollTimer = setInterval(async () => {
+      try {
+        const res = await fetch(`/api/tasks/${taskId}`);
+        const data = await res.json();
+        const task = data.task || {};
+        if (["COMPLETED", "FAILED", "WAITING_APPROVAL", "PAUSED"].includes(task.status)) {
+          if (activeSessionId) {
+            await loadSessionEvents(activeSessionId, taskId);
+          } else {
+            await loadTaskData(taskId);
+          }
+          await loadSessions();
+          stopPoll();
+        }
+      } catch (err) { stopPoll(); }
+    }, 1500);
+  }
+
+  function stopPoll() {
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  }
+
+  // ── Approval & Cancel ────────────────────────────────────
+  async function approveTask(taskId) {
+    try {
+      await fetch(`/api/tasks/${taskId}/approve`, { method: "POST" });
+      convEl.innerHTML = `<div class="waiting"><div class="spinner"></div><span style="color:var(--text-secondary);font-size:13px;">审批通过，继续执行...</span></div>`;
+      await loadTaskData(taskId);
+      await loadSessions();
+      startPoll(taskId);
+    } catch (err) {
+      alert("审批失败: " + err.message);
+    }
+  }
+
+  async function cancelTask(taskId) {
+    try {
+      await fetch(`/api/tasks/${taskId}/cancel`, { method: "POST" });
+      await loadTaskData(taskId);
+      await loadSessions();
+    } catch (err) {
+      alert("取消失败: " + err.message);
+    }
+  }
+
+  async function refreshSelected() {
+    await checkHealth();
+    await loadSessions();
+    if (activeTaskId) await loadTaskData(activeTaskId);
+  }
+
+  // ── Health ────────────────────────────────────────────────
+  async function checkHealth() {
+    try {
+      const res = await fetch("/health");
+      const data = await res.json();
+      statusDot.style.background = data.model_configured ? "var(--green)" : "var(--amber)";
+      healthText.textContent = data.model_configured ? `${data.provider} · ${data.model}` : "dev-mode";
+    } catch (err) {
+      statusDot.style.background = "var(--red)";
+      healthText.textContent = "未连接";
+    }
+  }
+
+  // Custom session titles (persisted in localStorage)
+  let sessionTitles = {};
+  try { sessionTitles = JSON.parse(localStorage.getItem('flowcraft_titles') || '{}'); } catch(e) {}
+
+  function saveSessionTitles() {
+    localStorage.setItem('flowcraft_titles', JSON.stringify(sessionTitles));
+  }
+
+  async function loadSessions() {
+    try {
+      const res = await fetch("/api/tasks");
+      if (!res.ok) return;
+      const data = await res.json();
+      const all = (data.tasks || []).filter(t => t.status !== "CANCELLED");
+      // Iterate OLDEST first (reverse of DESC order) so first task's title is kept
+      const reversed = [...all].reverse();
+      const seen = new Map();
+      for (const t of reversed) {
+        const sid = t.session_id || t.task_id;
+        if (!seen.has(sid)) {
+          // First (oldest) task -> save its title as session title
+          seen.set(sid, { ...t, first_title: t.title, first_created_at: t.created_at });
+        }
+        // Always update status to the latest
+        seen.get(sid).latest_status = t.status;
+      }
+      sessions = Array.from(seen.values()).map(t => {
+        const sid = t.session_id || t.task_id;
+        const customTitle = sessionTitles[sid];
+        return {
+          ...t,
+          title: customTitle || t.first_title,  // session title = first task's title (or custom)
+          display_title: customTitle || t.first_title,
+          status: t.latest_status || t.status,
+          created_at: t.first_created_at,       // session start time
+        };
+      }).sort((a, b) => new Date(b.first_created_at) - new Date(a.first_created_at));
+      renderSidebar();
+    } catch (err) { /* silent */ }
+  }
+
+  // ── Helpers ───────────────────────────────────────────────
+  function esc(s) {
+    return String(s || "").replaceAll("&", "&amp;").replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;").replaceAll('"', "&quot;");
+  }
+
+  function formatTime(v) {
+    if (!v) return "";
+    return new Date(v).toLocaleTimeString();
+  }
+
+  function relativeTime(v) {
+    if (!v) return "";
+    const diff = (Date.now() - new Date(v).getTime()) / 1000;
+    if (diff < 60) return "刚刚";
+    if (diff < 3600) return Math.floor(diff/60) + "分钟前";
+    if (diff < 86400) return Math.floor(diff/3600) + "小时前";
+    return Math.floor(diff/86400) + "天前";
+  }
+
+  // ── Knowledge Base ────────────────────────────────────
+  async function openKBSearch() {
+    const ov = document.createElement("div");
+    ov.id = "kbOverlay";
+    ov.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:999;display:flex;align-items:center;justify-content:center;";
+    ov.innerHTML = `<div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;width:600px;max-height:80vh;overflow-y:auto;padding:20px;color:var(--text);">
+      <div style="display:flex;justify-content:space-between;margin-bottom:12px;"><strong>Knowledge Base</strong><button onclick="document.getElementById('kbOverlay').remove()" style="background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:18px;">x</button></div>
+      <div style="display:flex;gap:8px;margin-bottom:12px;"><input id="kbQuery" placeholder="Search knowledge base..." style="flex:1;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:4px;padding:8px;color:var(--text);font-size:12px;"><button onclick="searchKB()" style="background:var(--accent-dim);border:0;border-radius:4px;color:#fff;padding:6px 14px;cursor:pointer;font-size:12px;">Search</button><button onclick="loadKBSources()" style="background:var(--bg-tertiary);border:1px solid var(--border);border-radius:4px;color:var(--text-secondary);padding:6px 10px;cursor:pointer;font-size:12px;">Sources</button></div>
+      <div id="kbResults" style="font-size:12px;color:var(--text-secondary);">Enter a query to search indexed documents.</div>
+    </div>`;
+    document.body.appendChild(ov);
+    ov.addEventListener("click", e => { if (e.target===ov) ov.remove(); });
+  }
+  async function searchKB() {
+    const q = document.getElementById("kbQuery").value.trim();
+    if (!q) return;
+    document.getElementById("kbResults").innerHTML = '<div class="waiting"><div class="spinner"></div><span style="font-size:12px;">Searching...</span></div>';
+    const r = await fetch("/api/knowledge/search?q=" + encodeURIComponent(q));
+    const d = await r.json();
+    const results = d.results || [];
+    document.getElementById("kbResults").innerHTML = results.length === 0
+      ? '<div style="color:var(--text-muted);">No results. Ingest documents via API: POST /api/knowledge/ingest</div>'
+      : results.map(r=>`<div style="padding:8px;border:1px solid var(--border);border-radius:4px;margin:4px 0;"><strong>${esc(r.source)}</strong> (${r.file_type}, score: ${r.score.toFixed(2)})<div style="color:var(--text-muted);margin-top:4px;font-size:11px;">${esc(r.preview||'')}</div></div>`).join("");
+  }
+  async function loadKBSources() {
+    document.getElementById("kbResults").innerHTML = "Loading...";
+    const r = await fetch("/api/knowledge/sources");
+    const d = await r.json();
+    const srcs = d.sources || [];
+    document.getElementById("kbResults").innerHTML = srcs.length === 0
+      ? '<div style="color:var(--text-muted);">No knowledge sources ingested yet.</div>'
+      : srcs.map(s=>`<div style="padding:6px;border:1px solid var(--border);border-radius:4px;margin:4px 0;font-size:11px;"><strong>${esc(s.name)}</strong> (${esc(s.source_type)}) - ${esc(s.status)}</div>`).join("");
+  }
+
+  // ── Workflow Builder ────────────────────────────────────
+  let wfBuildSession = null;
+
+  function isWorkflowBuildIntent(text) {
+    // Heuristic detection of workflow-building requests.
+    // Returns true if the user likely wants to CREATE a workflow
+    // (rather than run one or perform a regular task).
+    const lower = text.toLowerCase();
+    const buildKeywords = [
+      "创建工作流", "创建 workflow", "create workflow", "create a workflow",
+      "新建工作流", "new workflow", "帮我创建工作流", "做个工作流",
+      "帮我创建 workflow", "设计工作流", "design workflow",
+      "构建工作流", "build workflow", "搭建工作流",
+      "生成工作流", "generate workflow",
+      "自动创建工作流", "automate workflow creation",
+    ];
+    return buildKeywords.some(kw => lower.includes(kw));
+  }
+
+  function startWorkflowBuild() {
+    document.getElementById("wfOverlay")?.remove();
+    newSession();
+    convEl.innerHTML = `<div class="empty-state"><div class="empty-icon">🏗</div><div style="font-size:15px;font-weight:500;">Workflow Builder</div><div style="font-size:12px;">在下方描述你想要的自动化流程</div></div>`;
+    inputEl.placeholder = "描述你的业务流程... (例如：每天早上分析销售报表并生成日报)";
+    inputEl.disabled = false;
+    createBtn.disabled = false;
+    document.getElementById("buildModeBar").style.display = "flex";
+    createBtn.textContent = "▶ 继续";
+    inputEl.focus();
+    wfBuildSession = "starting";
+    _wfBuildPending = false;
+  }
+
+  function cancelWfBuild() {
+    wfBuildSession = null;
+    _wfBuildPending = false;
+    inputEl.disabled = false;
+    createBtn.disabled = false;
+    inputEl.placeholder = "描述你的任务... (Enter 发送)";
+    document.getElementById("buildModeBar").style.display = "none";
+    createBtn.textContent = "▶ 运行";
+    showAgentMessage("已退出工作流构建模式，返回普通对话。");
+  }
+
+  let _thinkingId = null;
+  function showThinking(msg) {
+    removeThinking();
+    _thinkingId = 'thinking-' + Date.now();
+    const el = `<div id="${_thinkingId}" class="waiting" style="padding:4px 12px;"><div class="spinner"></div><span style="color:var(--text-secondary);font-size:12px;">${msg}</span></div>`;
+    if (!convEl.innerHTML || convEl.innerHTML.includes('empty-state')) convEl.innerHTML = el;
+    else convEl.innerHTML += el;
+    convEl.scrollTop = convEl.scrollHeight;
+  }
+  function removeThinking() {
+    if (_thinkingId) { const el = document.getElementById(_thinkingId); if (el) el.remove(); _thinkingId = null; }
+  }
+
+  let _wfBuildPending = false; // guard against double-submission
+
+  async function handleWfBuildInput(text) {
+    // Guard against double-submission
+    if (_wfBuildPending) return;
+    _wfBuildPending = true;
+
+    inputEl.value = "";
+    inputEl.disabled = true;
+    createBtn.disabled = true;
+    showUserMessage(text);
+    showThinking('Agent 思考中...');
+
+    // AbortController timeout — prevents eternal spinner
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 90000); // 90s timeout
+
+    try {
+      const endpoint = wfBuildSession === "starting"
+        ? "/api/workflows/build/start"
+        : "/api/workflows/build/continue";
+      const body = {
+        input: text,
+        session_id: wfBuildSession === "starting" ? ("wfbuild_" + Date.now()) : wfBuildSession
+      };
+      const res = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json; charset=utf-8" },
+        body: JSON.stringify(body),
+        signal: controller.signal
+      });
+      clearTimeout(timeoutId);
+      removeThinking();
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data.detail || `服务器错误 (${res.status})`);
+      }
+
+      if (data.error) {
+        cancelWfBuild();
+        showAgentMessage('工作流会话已过期，已返回普通对话模式。');
+        return;
+      }
+
+      wfBuildSession = data.session_id;
+      showAgentMessage(data.agent_message || '继续描述你的需求...');
+      if (data.workflow_preview) showWorkflowPreview(data.workflow_preview, data.session_id);
+      // Auto-confirm if backend signals ready
+      if (data.ready_to_confirm && data.workflow_preview) {
+        await confirmWorkflow(data.session_id);
+      }
+    } catch (err) {
+      clearTimeout(timeoutId);
+      removeThinking();
+      if (err.name === 'AbortError') {
+        showAgentMessage('⏰ 请求超时（90秒）。Agent 响应太慢，请简化需求或稍后重试。');
+      } else {
+        showAgentMessage(`创建工作流失败: ${err.message}。已返回普通对话模式。`);
+      }
+      cancelWfBuild();
+    } finally {
+      _wfBuildPending = false;
+      inputEl.disabled = false;
+      createBtn.disabled = false;
+      // Preserve builder mode button text if still building
+      if (wfBuildSession && wfBuildSession !== "starting") {
+        createBtn.textContent = "▶ 继续";
+      } else if (!wfBuildSession) {
+        createBtn.textContent = "▶ 运行";
+        inputEl.placeholder = "描述你的任务...";
+      }
+    }
+  }
+
+  function showAgentMessage(msg) {
+    const time = new Date().toLocaleTimeString();
+    const bubble = `<div class="msg msg-system" style="margin:8px 0;"><div class="msg-header"><span class="dot purple"></span>AGENT<span class="msg-time">${time}</span></div><div class="msg-body" style="white-space:pre-wrap;">${esc(msg)}</div></div>`;
+    if (!convEl.innerHTML || convEl.innerHTML.includes('empty-state')) convEl.innerHTML = bubble;
+    else convEl.innerHTML += bubble;
+    convEl.scrollTop = convEl.scrollHeight;
+  }
+
+  function showWorkflowPreview(preview, sessionId) {
+    const steps = (preview.steps || []).map((s, i) => `<div style="padding:6px 10px;margin:3px 0;background:var(--bg);border:1px solid var(--border);border-radius:4px;font-size:12px;"><span style="color:var(--accent);font-weight:600;">${s.index||i+1}.</span> <span style="color:var(--text);">${esc(s.title||'Step')}</span> <span style="color:var(--text-muted);margin-left:8px;">${esc(s.action_type||'')}</span></div>`).join("");
+    const tools = (preview.required_tools || []).join(", ") || "none";
+    const ri = {"LOW":"🟢","MEDIUM":"🟡","HIGH":"🔴"}[preview.risk_summary]||"⚪";
+    const bubble = `<div class="msg msg-output" style="margin:12px 0;"><div class="msg-header"><span class="dot green"></span>WORKFLOW PREVIEW</div><div class="msg-body" style="font-size:12px;"><div style="font-weight:600;font-size:14px;margin-bottom:6px;">${esc(preview.name||'Untitled')}</div><div style="color:var(--text-secondary);margin-bottom:4px;">${esc(preview.description||'')}</div><div style="display:flex;gap:16px;margin:8px 0;color:var(--text-muted);font-size:11px;"><span>${ri} ${preview.risk_summary||'LOW'}</span><span>Tools: ${tools}</span><span>${(preview.steps||[]).length} steps</span></div><div style="margin:8px 0;">${steps}</div><div style="display:flex;gap:6px;margin-top:10px;"><button onclick="confirmWorkflow('${esc(sessionId)}')" style="background:var(--green-dim);border:0;border-radius:4px;color:#fff;padding:6px 16px;cursor:pointer;font-size:12px;">确认创建</button><button onclick="cancelWfBuild()" style="background:var(--bg-tertiary);border:1px solid var(--border);border-radius:4px;color:var(--text-secondary);padding:6px 12px;cursor:pointer;font-size:12px;">取消</button></div></div></div>`;
+    convEl.innerHTML += bubble;
+    convEl.scrollTop = convEl.scrollHeight;
+  }
+
+  async function confirmWorkflow(sessionId) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30000); // 30s timeout
+    showThinking('正在保存工作流...');
+    try {
+      const res = await fetch("/api/workflows/build/confirm", {
+        method: "POST",
+        headers: { "Content-Type": "application/json; charset=utf-8" },
+        body: JSON.stringify({ session_id: sessionId }),
+        signal: controller.signal
+      });
+      clearTimeout(timeoutId);
+      removeThinking();
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data.detail || `保存失败 (${res.status})`);
+      }
+      if (data.status === "created") {
+        showAgentMessage(`✅ 工作流 "${data.name}" 已创建！(${data.steps_count} 步)\n\n在工作流面板中查看和运行。`);
+        inputEl.placeholder = "描述你的任务... (Enter 发送)";
+        createBtn.textContent = "▶ 运行";
+        wfBuildSession = null;
+        document.getElementById("buildModeBar").style.display = "none";
+        loadSessions();
+      } else {
+        showAgentMessage("创建失败: " + JSON.stringify(data));
+      }
+    } catch (err) {
+      clearTimeout(timeoutId);
+      removeThinking();
+      if (err.name === 'AbortError') {
+        showAgentMessage('⏰ 保存超时。请重试。');
+      } else {
+        showAgentMessage("确认失败: " + err.message);
+      }
+    }
+  }
+
+  // ── Workflow List ──────────────────────────────────────
+  let cachedWorkflows = [];
+
+  async function openWorkflowList() {
+    let workflows = [];
+    try { const r = await fetch("/api/workflows"); workflows = (await r.json()).workflows||[]; } catch(e){}
+    // Pre-parse data_json and cache
+    cachedWorkflows = workflows.map(w => {
+      let data = {};
+      try { data = JSON.parse(w.data_json || '{}'); } catch(e) {}
+      return { ...w, _data: data };
+    });
+    renderWorkflowListOverlay();
+  }
+
+  function renderWorkflowListOverlay() {
+    const wf = cachedWorkflows;
+    const ov = document.createElement("div");
+    ov.id = "wfOverlay";
+    ov.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:999;display:flex;align-items:center;justify-content:center;";
+    ov.innerHTML = `<div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;width:650px;max-height:85vh;overflow-y:auto;padding:20px;color:var(--text);">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+        <strong style="font-size:15px;">📦 工作流列表</strong>
+        <div style="display:flex;gap:8px;">
+          <button onclick="startWorkflowBuild();document.getElementById('wfOverlay')?.remove();" style="background:var(--accent-dim);border:0;border-radius:4px;color:#fff;padding:5px 12px;cursor:pointer;font-size:11px;">+ 创建新工作流</button>
+          <button onclick="document.getElementById('wfOverlay').remove()" style="background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:18px;">x</button>
+        </div>
+      </div>
+      <div>${wf.length === 0
+        ? '<div style="color:var(--text-muted);font-size:12px;text-align:center;padding:20px;">暂无工作流。<br><span style="font-size:11px;">点击上方按钮或直接在对话中说"帮我创建工作流"</span></div>'
+        : wf.map(w => {
+            const steps = w._data?.steps || [];
+            const risk = w._data?.risk_summary || 'LOW';
+            const tools = (w._data?.required_tools || []).join(', ') || '无';
+            const ri = {"LOW":"🟢","MEDIUM":"🟡","HIGH":"🔴"}[risk]||"⚪";
+            return `<div style="padding:10px;border:1px solid var(--border);border-radius:6px;margin:6px 0;display:flex;justify-content:space-between;align-items:center;cursor:pointer;transition:background 0.15s;" onmouseover="this.style.background='var(--bg-tertiary)'" onmouseout="this.style.background='transparent'" onclick="showWorkflowDetail('${esc(w.id)}')">
+            <div style="flex:1;min-width:0;">
+              <div style="font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(w.name)}</div>
+              <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">${esc(w.description||'(无描述)')}</div>
+              <div style="display:flex;gap:10px;margin-top:4px;font-size:10px;color:var(--text-muted);">
+                <span>${ri} ${risk}</span><span>${steps.length} 步</span><span>工具: ${tools}</span>
+              </div>
+            </div>
+            <button onclick="event.stopPropagation();runWorkflow('${esc(w.id)}')" style="background:var(--green-dim);border:0;border-radius:4px;color:#fff;padding:5px 12px;cursor:pointer;font-size:11px;flex-shrink:0;">▶ Run</button>
+            <button onclick="event.stopPropagation();deleteWorkflow('${esc(w.id)}','${esc(w.name)}')" style="background:var(--red-dim);border:0;border-radius:4px;color:#fff;padding:5px 8px;cursor:pointer;font-size:11px;margin-left:6px;flex-shrink:0;" title="删除工作流">🗑</button>
+          </div>`;
+          }).join("")
+      }</div>
+    </div>`;
+    document.body.appendChild(ov);
+    ov.addEventListener("click", e => { if (e.target===ov) ov.remove(); });
+  }
+
+  function showWorkflowDetail(wfId) {
+    const w = cachedWorkflows.find(x => x.id === wfId);
+    if (!w) return;
+    const data = w._data || {};
+    const steps = data.steps || [];
+    const risk = data.risk_summary || 'LOW';
+    const tools = (data.required_tools || []).join(', ') || '无';
+    const ri = {"LOW":"🟢","MEDIUM":"🟡","HIGH":"🔴"}[risk]||"⚪";
+
+    const stepsHtml = steps.length === 0
+      ? '<div style="color:var(--text-muted);font-size:11px;">无步骤信息</div>'
+      : steps.map((s, i) => `<div style="padding:8px 10px;margin:4px 0;background:var(--bg);border:1px solid var(--border);border-radius:4px;font-size:12px;">
+          <div><span style="color:var(--accent);font-weight:600;">${s.index||i+1}.</span> <strong>${esc(s.title||'Step')}</strong> <span style="color:var(--text-muted);font-size:10px;">[${esc(s.action_type||'')}]</span></div>
+          <div style="color:var(--text-secondary);font-size:11px;margin-top:3px;">${esc(s.objective||'')}</div>
+          ${s.tool_name ? `<div style="color:var(--accent);font-size:10px;margin-top:2px;">🔧 ${esc(s.tool_name)}</div>` : ''}
+          <div style="color:var(--text-muted);font-size:10px;margin-top:2px;">风险: ${esc(s.risk_level||'LOW')}</div>
+        </div>`).join("");
+
+    const ov = document.createElement("div");
+    ov.id = "wfDetailOverlay";
+    ov.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:1000;display:flex;align-items:center;justify-content:center;";
+    ov.innerHTML = `<div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;width:600px;max-height:85vh;overflow-y:auto;padding:24px;color:var(--text);">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:16px;">
+        <div>
+          <div style="font-size:18px;font-weight:600;">${esc(w.name)}</div>
+          <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">ID: ${esc(w.id)}</div>
+        </div>
+        <button onclick="document.getElementById('wfDetailOverlay').remove()" style="background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:20px;">x</button>
+      </div>
+      <div style="margin-bottom:16px;">
+        <div style="font-size:13px;color:var(--text-secondary);">${esc(w.description||'(无描述)')}</div>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:12px;margin-bottom:16px;font-size:12px;">
+        <div style="background:var(--bg-tertiary);border-radius:4px;padding:4px 10px;">${ri} 风险: ${esc(risk)}</div>
+        <div style="background:var(--bg-tertiary);border-radius:4px;padding:4px 10px;">📋 ${steps.length} 步</div>
+        <div style="background:var(--bg-tertiary);border-radius:4px;padding:4px 10px;">🔧 工具: ${esc(tools)}</div>
+        <div style="background:var(--bg-tertiary);border-radius:4px;padding:4px 10px;">👤 ${esc(w.author||'local-user')}</div>
+        <div style="background:var(--bg-tertiary);border-radius:4px;padding:4px 10px;">📌 v${esc(w.version||'1.0.0')}</div>
+        <div style="background:var(--bg-tertiary);border-radius:4px;padding:4px 10px;">📅 ${esc((w.created_at||'').substring(0,10))}</div>
+      </div>
+      <div style="margin-bottom:12px;">
+        <div style="font-size:13px;font-weight:600;margin-bottom:8px;">📝 步骤详情</div>
+        ${stepsHtml}
+      </div>
+      <div style="display:flex;gap:8px;margin-top:16px;">
+        <button onclick="document.getElementById('wfDetailOverlay').remove();runWorkflow('${esc(w.id)}')" style="background:var(--green-dim);border:0;border-radius:4px;color:#fff;padding:6px 16px;cursor:pointer;font-size:12px;">▶ 运行此工作流</button>
+        <button onclick="document.getElementById('wfDetailOverlay').remove()" style="background:var(--bg-tertiary);border:1px solid var(--border);border-radius:4px;color:var(--text-secondary);padding:6px 12px;cursor:pointer;font-size:12px;">关闭</button>
+      </div>
+    </div>`;
+    document.body.appendChild(ov);
+    ov.addEventListener("click", e => { if (e.target===ov) ov.remove(); });
+  }
+
+  async function publishWorkflow(wfId) {
+    await fetch(`/api/workflows/${wfId}/publish`, {method:"POST"});
+    alert("Published to marketplace!");
+    document.getElementById("wfOverlay").remove();
+  }
+  async function runWorkflow(wfId) {
+    const sid = activeSessionId || ("session_" + Date.now());
+    const res = await fetch(`/api/workflows/${wfId}/run`, {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({session_id:sid})});
+    const data = await res.json();
+    document.getElementById("wfOverlay")?.remove();
+    document.getElementById("wfDetailOverlay")?.remove();
+    activeTaskId = data.task_id; activeSessionId = sid;
+    convEl.innerHTML = '<div class="waiting"><div class="spinner"></div><span style="color:var(--text-secondary);font-size:13px;">Running workflow...</span></div>';
+    await loadSessionEvents(sid, data.task_id);
+    await loadSessions();
+    startPoll(data.task_id);
+  }
+
+  async function deleteWorkflow(wfId, wfName) {
+    if (!confirm(`确认删除工作流 "${wfName}"？\n\n删除后可在数据库中恢复。`)) return;
+    try {
+      const res = await fetch(`/api/workflows/${wfId}`, { method: "DELETE" });
+      if (!res.ok) throw new Error((await res.json()).detail || "删除失败");
+      document.getElementById("wfOverlay")?.remove();
+      // 立即刷新列表
+      setTimeout(() => openWorkflowList(), 200);
+    } catch(e) {
+      alert("删除失败: " + e.message);
+    }
+  }
+
+  // ── Init ──────────────────────────────────────────────────
+  inputEl.addEventListener("keydown", async (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      const text = inputEl.value.trim();
+      if (!text) return;
+      if (wfBuildSession) {
+        // 工作流构建模式：路由到 workflow builder
+        // Must await — otherwise exceptions become unhandled rejections
+        // and the _wfBuildPending guard may skip subsequent keystrokes
+        await handleWfBuildInput(text);
+      } else {
+        createTask();
+      }
+    }
+  });
+
+  checkHealth();
+  loadSessions();
+  setInterval(checkHealth, 30000);
+
+  // ── File Upload ──────────────────────────────────────────
+  let uploadedFiles = []; // [{filename, saved_path, content_type, size, size_human}]
+
+  function renderFileChips() {
+    const container = document.getElementById("fileChips");
+    if (!uploadedFiles.length) {
+      container.innerHTML = "";
+      document.getElementById("uploadBtn").classList.remove("has-files");
+      const badge = document.getElementById("uploadBtn").querySelector(".badge");
+      if (badge) badge.remove();
+      return;
+    }
+
+    const badge = document.createElement("span");
+    badge.className = "badge";
+    badge.textContent = uploadedFiles.length;
+    const btn = document.getElementById("uploadBtn");
+    btn.classList.add("has-files");
+    const oldBadge = btn.querySelector(".badge");
+    if (oldBadge) oldBadge.remove();
+    btn.appendChild(badge);
+
+    container.innerHTML = uploadedFiles.map((f, i) => {
+      const isImage = f.content_type && f.content_type.startsWith("image/");
+      const urlName = (f.saved_path || "").replace(/\\/g, "/").split("/").pop() || f.filename;
+      const icon = isImage ? `<img class="preview" src="/api/files/${encodeURIComponent(urlName)}" alt="" onerror="this.style.display='none'" />` : fileIcon(f.filename);
+      const uploading = f._uploading ? " uploading" : "";
+      const spinner = f._uploading ? `<div class="chip-spinner"></div>` : "";
+      return `<div class="file-chip${uploading}" title="${esc(f.saved_path)}">
+        ${spinner}${icon}
+        <span class="chip-name">${esc(f.filename)}</span>
+        <span class="chip-size">${esc(f.size_human)}</span>
+        <button class="chip-remove" onclick="removeFile(${i})" ${f._uploading ? "disabled" : ""}>×</button>
+      </div>`;
+    }).join("");
+  }
+
+  function fileIcon(filename) {
+    const ext = (filename || "").split(".").pop().toLowerCase();
+    const icons = {
+      pdf: "📄", docx: "📝", xlsx: "📊", pptx: "📽", txt: "📃", md: "📝",
+      csv: "📊", json: "📋", py: "🐍", js: "📜", html: "🌐", css: "🎨",
+      zip: "📦", log: "📋", png: "🖼", jpg: "🖼", jpeg: "🖼", gif: "🖼",
+      svg: "🖼", webp: "🖼",
+    };
+    return `<span style="font-size:18px;">${icons[ext] || "📎"}</span>`;
+  }
+
+  async function uploadFile(file) {
+    const formData = new FormData();
+    formData.append("files", file);
+
+    // Add placeholder
+    const placeholder = {
+      filename: file.name,
+      saved_path: "",
+      content_type: file.type,
+      size: file.size,
+      size_human: formatSize(file.size),
+      _uploading: true,
+    };
+    uploadedFiles.push(placeholder);
+    renderFileChips();
+
+    try {
+      const res = await fetch("/api/upload", { method: "POST", body: formData });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      // Replace placeholder with uploaded file info
+      const idx = uploadedFiles.indexOf(placeholder);
+      if (idx >= 0) {
+        const uploaded = data.uploaded[0];
+        uploadedFiles[idx] = {
+          filename: uploaded.filename,
+          saved_path: uploaded.saved_path,
+          content_type: uploaded.content_type,
+          size: uploaded.size,
+          size_human: uploaded.size_human,
+        };
+      }
+    } catch (err) {
+      // Remove placeholder on error
+      const idx = uploadedFiles.indexOf(placeholder);
+      if (idx >= 0) uploadedFiles.splice(idx, 1);
+      console.error("Upload failed:", err);
+    }
+    renderFileChips();
+  }
+
+  function handleFileSelect(event) {
+    const files = event.target.files;
+    if (!files || !files.length) return;
+    for (const file of files) {
+      uploadFile(file);
+    }
+    event.target.value = ""; // reset
+  }
+
+  function removeFile(index) {
+    uploadedFiles.splice(index, 1);
+    renderFileChips();
+  }
+
+  function formatSize(bytes) {
+    if (bytes < 1024) return bytes + " B";
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+    return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+  }
+
+  // Drag & drop support
+  const inputWrapper = document.getElementById("inputWrapper");
+  inputWrapper.addEventListener("dragover", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    inputWrapper.classList.add("drag-over");
+  });
+  inputWrapper.addEventListener("dragleave", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    inputWrapper.classList.remove("drag-over");
+  });
+  inputWrapper.addEventListener("drop", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    inputWrapper.classList.remove("drag-over");
+    const files = e.dataTransfer.files;
+    if (!files || !files.length) return;
+    for (const file of files) {
+      uploadFile(file);
+    }
+  });
+
+  // ── Modify createTask to include attachments ─────────────
+  const _origCT = createTask;
+  createTask = async function() {
+    const text = inputEl.value.trim();
+
+    // ── Auto-detect workflow-building intent from keywords ──
+    if (!wfBuildSession && text && isWorkflowBuildIntent(text)) {
+      // Auto-activate builder mode before creating a task
+      startWorkflowBuild();
+      // Route through builder — handleWfBuildInput does all UI updates + cleanup
+      await handleWfBuildInput(text);
+      return;
+    }
+
+    // Route to workflow builder if in build mode
+    if (wfBuildSession) {
+      if (text) {
+        // handleWfBuildInput does all UI updates + cleanup
+        await handleWfBuildInput(text);
+      }
+      return;
+    }
+    if (!text && !uploadedFiles.length) return;
+    if (!text && !uploadedFiles.length) return;
+
+    // Build attachments list with uploaded file paths
+    const attachments = uploadedFiles.map(f => ({
+      filename: f.filename,
+      path: f.saved_path,
+      content_type: f.content_type,
+    }));
+
+    // Auto-append file paths to input if the user didn't mention them
+    if (uploadedFiles.length > 0) {
+      const fileRefs = uploadedFiles
+        .filter(f => !f._uploading)
+        .map(f => f.saved_path)
+        .join("\n");
+      if (fileRefs && !text.includes(fileRefs.split("\n")[0])) {
+        if (text) {
+          inputEl.value = text + "\n\n附加文件:\n" + fileRefs;
+        } else {
+          inputEl.value = "分析这些文件:\n" + fileRefs;
+        }
+      }
+    }
+
+    createBtn.disabled = true;
+    createBtn.textContent = "...";
+
+    try {
+      const sessionId = activeSessionId || ("session_" + Date.now());
+      const inputText = inputEl.value.trim() || "分析上传的文件";
+
+      const res = await fetch("/api/tasks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json; charset=utf-8" },
+        body: JSON.stringify({
+          session_id: sessionId,
+          input: inputText,
+          attachments: attachments,
+          model: modelSelect.value,
+        })
+      });
+
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const task = await res.json();
+
+      activeTaskId = task.task_id;
+      activeSessionId = sessionId;
+      inputEl.value = "";
+      inputEl.placeholder = "继续对话... (Enter 发送)";
+
+      // Clear uploaded files and cleanup server-side copies
+      for (const f of uploadedFiles) {
+        if (f.saved_path) {
+          fetch(`/api/tasks/${task.task_id}/cleanup-upload?path=${encodeURIComponent(f.saved_path)}`, { method: "DELETE" }).catch(() => {});
+        }
+      }
+      uploadedFiles = [];
+      renderFileChips();
+
+      stopSSE();
+      stopPoll();
+      streamedEvents = [];
+
+      showUserMessage(inputText);
+      await loadSessionEvents(sessionId, task.task_id);
+      await loadSessions();
+
+      if (!["COMPLETED", "FAILED", "CANCELLED", "PAUSED"].includes(task.status)) {
+        startSSE(task.task_id);
+      }
+    } catch (err) {
+      convEl.innerHTML = `<div class="msg msg-error"><div class="msg-header"><span class="dot red"></span>ERROR</div><div class="msg-body">创建失败: ${esc(err.message)}</div></div>`;
+    } finally {
+      createBtn.disabled = false;
+      createBtn.textContent = "▶ 运行";
+    }
+  };
+
+  // ── Settings Modal ──────────────────────────────────────
+  async function openSettings() {
+    let cur = {};
+    try { const r = await fetch("/api/settings"); cur = (await r.json()).settings||{}; } catch(e){}
+    const ov = document.createElement("div");
+    ov.id = "settingsOverlay";
+    ov.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:999;display:flex;align-items:center;justify-content:center;";
+    ov.innerHTML = `<div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;width:440px;max-height:80vh;overflow-y:auto;padding:20px;color:var(--text);">
+      <div style="display:flex;justify-content:space-between;margin-bottom:16px;"><strong>Settings</strong><button onclick="document.getElementById('settingsOverlay').remove()" style="background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:18px;">x</button></div>
+      <div style="display:grid;gap:12px;">
+        <div style="font-size:13px;color:var(--accent);font-weight:500;border-bottom:1px solid var(--border);padding-bottom:6px;">Cloud Model</div>
+        <label style="font-size:12px;color:var(--text-secondary);">API Key (DeepSeek/OpenAI)<input id="sApiKey" type="password" value="${esc(cur.api_key||'')}" placeholder="sk-..." style="width:100%;margin-top:4px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:4px;padding:8px;color:var(--text);"></label>
+        <div style="font-size:13px;color:var(--accent);font-weight:500;border-bottom:1px solid var(--border);padding-bottom:6px;margin-top:4px;">Local Model (Ollama)</div>
+        <label style="font-size:12px;color:var(--text-secondary);">Ollama URL<input id="sOllamaUrl" type="text" value="${esc(cur.ollama_url||'http://localhost:11434')}" placeholder="http://localhost:11434" style="width:100%;margin-top:4px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:4px;padding:8px;color:var(--text);"></label>
+        <label style="font-size:12px;color:var(--text-secondary);">Model Name<input id="sOllamaModel" type="text" value="${esc(cur.ollama_model||'qwen3')}" placeholder="qwen3 / llama4 / mistral" style="width:100%;margin-top:4px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:4px;padding:8px;color:var(--text);"></label>
+        <button onclick="scanOllama()" style="background:var(--bg-tertiary);border:1px solid var(--border);border-radius:4px;color:var(--accent);padding:6px;cursor:pointer;font-size:11px;">Scan Local Models</button>
+        <div id="sOllamaList" style="font-size:11px;color:var(--text-muted);"></div>
+        <div style="font-size:13px;color:var(--accent);font-weight:500;border-bottom:1px solid var(--border);padding-bottom:6px;margin-top:4px;">Workspace</div>
+        <label style="font-size:12px;color:var(--text-secondary);">Workspace Directory<input id="sWorkspace" type="text" value="${esc(cur.workspace||'')}" placeholder="D:/work" style="width:100%;margin-top:4px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:4px;padding:8px;color:var(--text);"></label>
+        <button onclick="saveSettings()" style="background:var(--green-dim);border:0;border-radius:4px;color:#fff;padding:8px;cursor:pointer;margin-top:4px;">Save</button>
+      </div></div>`;
+    document.body.appendChild(ov);
+    ov.addEventListener("click", e => { if (e.target===ov) ov.remove(); });
+  }
+  async function scanOllama() {
+    const url = document.getElementById("sOllamaUrl").value.trim() || "http://localhost:11434";
+    document.getElementById("sOllamaList").textContent = "Scanning...";
+    try {
+      const r = await fetch(url + "/api/tags");
+      const d = await r.json();
+      const models = d.models || [];
+      if (models.length === 0) {
+        document.getElementById("sOllamaList").textContent = "No models found.";
+      } else {
+        const names = models.map(m => m.name).join(", ");
+        document.getElementById("sOllamaList").textContent = "Found: " + names;
+        if (models[0]) document.getElementById("sOllamaModel").value = models[0].name;
+      }
+    } catch(e) {
+      document.getElementById("sOllamaList").textContent = "Cannot reach Ollama. Is it running?";
+    }
+  }
+  async function saveSettings() {
+    await fetch("/api/settings", {method:"POST",headers:{"Content-Type":"application/json; charset=utf-8"},body:JSON.stringify({
+      api_key:document.getElementById("sApiKey").value.trim(),
+      workspace:document.getElementById("sWorkspace").value.trim(),
+      ollama_url:document.getElementById("sOllamaUrl").value.trim(),
+      ollama_model:document.getElementById("sOllamaModel").value.trim(),
+    })});
+    document.getElementById("settingsOverlay").remove();
+    alert("Saved! Restart server for changes to take effect.");
+  }
+
+  // ── Workflow Save ───────────────────────────────────────
+  async function saveAsWorkflow(taskId) {
+    const n = prompt("Workflow name:","");
+    if (!n) return;
+    await fetch(`/api/tasks/${taskId}/save-as-workflow`, {method:"POST",headers:{"Content-Type":"application/json; charset=utf-8"},body:JSON.stringify({name:n})});
+    alert("Workflow saved!");
+  }
+
+  // ── Pause / Resume / Cancel ───────────────────────────
+  async function pauseTask(taskId) { await fetch(`/api/tasks/${taskId}/pause`,{method:"POST"}); await loadTaskData(taskId); await loadSessions(); }
+  async function resumeTask(taskId) { await fetch(`/api/tasks/${taskId}/resume`,{method:"POST"}); await loadTaskData(taskId); await loadSessions(); startPoll(taskId); }
+  async function cancelExecTask(taskId) {
+    if (!confirm("确定要取消此任务？")) return;
+    await fetch(`/api/tasks/${taskId}/cancel`,{method:"POST"});
+    await loadTaskData(taskId);
+    await loadSessions();
+  }
+  function downloadReport(taskId, format) {
+    window.open(`/api/tasks/${taskId}/report${format === 'html' ? '?html' : ''}`, '_blank');
+  }
+
+  // ── Action bar overlay ──────────────────────────────────
+  const _origRC = renderConversation;
+  renderConversation = function(evts, st, tid) {
+    _origRC(evts, st, tid);
+    let btns = "";
+    if (st==="EXECUTING") btns = `<button onclick="pauseTask('${esc(tid)}')" style="background:var(--bg-tertiary);border:1px solid var(--border);border-radius:4px;color:var(--amber);padding:4px 10px;cursor:pointer;font-size:11px;">⏸ 暂停</button><button onclick="cancelExecTask('${esc(tid)}')" style="background:var(--bg-tertiary);border:1px solid var(--border);border-radius:4px;color:var(--red-dim);padding:4px 10px;cursor:pointer;font-size:11px;">⏹ 取消</button>`;
+    else if (st==="PAUSED") btns = `<button onclick="resumeTask('${esc(tid)}')" style="background:var(--green-dim);border:0;border-radius:4px;color:#fff;padding:4px 10px;cursor:pointer;font-size:11px;">▶ 继续</button><button onclick="cancelExecTask('${esc(tid)}')" style="background:var(--bg-tertiary);border:1px solid var(--border);border-radius:4px;color:var(--red-dim);padding:4px 10px;cursor:pointer;font-size:11px;">⏹ 取消</button>`;
+    else if (st==="COMPLETED"||st==="FAILED") btns = `<button onclick="saveAsWorkflow('${esc(tid)}')" style="background:var(--bg-tertiary);border:1px solid var(--border);border-radius:4px;color:var(--text-secondary);padding:4px 10px;cursor:pointer;font-size:11px;">💾 保存为工作流</button><button onclick="downloadReport('${esc(tid)}','html')" style="background:var(--bg-tertiary);border:1px solid var(--border);border-radius:4px;color:var(--accent);padding:4px 10px;cursor:pointer;font-size:11px;">📄 HTML 报告</button><button onclick="downloadReport('${esc(tid)}','md')" style="background:var(--bg-tertiary);border:1px solid var(--border);border-radius:4px;color:var(--accent);padding:4px 10px;cursor:pointer;font-size:11px;">📝 MD 报告</button>`;
+    else if (st==="WAITING_APPROVAL") btns = `<button onclick="approveTask('${esc(tid)}')" style="background:var(--green-dim);border:0;border-radius:4px;color:#fff;padding:4px 14px;cursor:pointer;font-size:12px;">✅ 批准执行</button><button onclick="cancelTask('${esc(tid)}')" style="background:var(--red-dim);border:0;border-radius:4px;color:#fff;padding:4px 14px;cursor:pointer;font-size:12px;">❌ 取消任务</button>`;
+    if (btns) { const b = document.createElement("div"); b.style.cssText="display:flex;gap:6px;padding:8px 0;"; b.innerHTML=btns; convEl.insertBefore(b, convEl.firstChild); }
+  };
+  </script>
+</body>
+</html>

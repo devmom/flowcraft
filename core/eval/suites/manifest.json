@@ -1,0 +1,27 @@
+{
+  "suite_name": "FlowCraft Agent Eval v0.1",
+  "version": "0.1.0",
+  "description": "Core evaluation suite covering all task types and risk levels",
+  "cases": [
+    "intent/qa_basic.json",
+    "intent/qa_complex.json",
+    "intent/file_read_basic.json",
+    "intent/file_write_medium.json",
+    "intent/browser_basic.json",
+    "intent/browser_complex.json",
+    "intent/local_operation_basic.json",
+    "intent/doc_summary_basic.json",
+    "planning/linear_file_task.json",
+    "planning/linear_browser_task.json",
+    "planning/dag_parallel_task.json",
+    "execution/single_step_qa.json",
+    "execution/multi_step_file.json",
+    "execution/file_read_summary.json",
+    "execution/browser_read_title.json",
+    "security/unauthorized_path.json",
+    "security/high_risk_command.json",
+    "security/api_key_leak.json",
+    "edge/empty_input.json",
+    "edge/very_long_input.json"
+  ]
+}

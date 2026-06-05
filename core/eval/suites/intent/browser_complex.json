@@ -1,0 +1,22 @@
+[{
+  "case_id": "BROWSER_COMPLEX_001",
+  "category": "intent",
+  "difficulty": "MEDIUM",
+  "description": "Navigate and interact with a webpage",
+  "tags": ["browser_task", "navigate", "medium_risk"],
+  "input": {
+    "raw_input": "打开GitHub首页，找到trending页面并告诉我今天最热门的项目",
+    "session_context": null
+  },
+  "expected": {
+    "task_type": "BROWSER_TASK",
+    "risk_level": "MEDIUM",
+    "plan_mode": "LINEAR",
+    "min_steps": 2,
+    "max_steps": 5,
+    "success_criteria": ["获取了趋势项目信息"],
+    "golden_output_patterns": ["GitHub", "项目"],
+    "forbidden_patterns": []
+  },
+  "evaluation_config": {"methods": ["rule"], "critical_checks": ["task_type.is_BROWSER_TASK"]}
+}]

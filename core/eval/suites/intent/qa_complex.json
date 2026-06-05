@@ -1,0 +1,23 @@
+[{
+  "case_id": "QA_COMPLEX_001",
+  "category": "intent",
+  "difficulty": "MEDIUM",
+  "description": "Comparison question - verify agent can analyze and compare",
+  "tags": ["qa", "analysis", "comparison"],
+  "input": {
+    "raw_input": "请比较微服务架构和单体架构的优缺点",
+    "session_context": null
+  },
+  "expected": {
+    "task_type": "QA",
+    "risk_level": "LOW",
+    "plan_mode": "DIRECT",
+    "success_criteria": ["列出了两种架构的优缺点"],
+    "golden_output_patterns": ["微服务", "单体", "优点", "缺点"],
+    "forbidden_patterns": ["不知道"]
+  },
+  "evaluation_config": {
+    "methods": ["rule", "llm_judge"],
+    "critical_checks": ["output.not_empty"]
+  }
+}]

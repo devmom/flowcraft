@@ -1,0 +1,25 @@
+[{
+  "case_id": "FILE_READ_BASIC_001",
+  "category": "intent",
+  "difficulty": "EASY",
+  "description": "Read and summarize a text file - verify file task recognition",
+  "tags": ["file_task", "read", "low_risk"],
+  "input": {
+    "raw_input": "读取readme.txt文件的内容并总结",
+    "session_context": null
+  },
+  "expected": {
+    "task_type": "FILE_TASK",
+    "risk_level": "LOW",
+    "plan_mode": "LINEAR",
+    "min_steps": 1,
+    "max_steps": 3,
+    "success_criteria": ["读取了文件内容", "给出了总结"],
+    "golden_output_patterns": ["文件", "内容"],
+    "forbidden_patterns": []
+  },
+  "evaluation_config": {
+    "methods": ["rule", "llm_judge"],
+    "critical_checks": ["task_type.is_FILE_TASK"]
+  }
+}]

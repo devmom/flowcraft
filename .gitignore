@@ -1,0 +1,66 @@
+# ── Python ──
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+*.so
+
+# ── Virtual environment ──
+.venv/
+venv/
+env/
+.venv*/
+
+# ── IDE ──
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ── OS ──
+.DS_Store
+Thumbs.db
+
+# ── Secrets & environment ──
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+config/api_key.txt
+
+# ── AI assistant config (may contain API keys) ──
+.claude/
+
+# ── Design docs & research (not for distribution) ──
+TechnicalArchitecture/
+
+# ── Build artifacts ──
+release/
+packaging/
+*.zip
+!requirements.txt
+
+# ── Logs & databases ──
+*.log
+*.db
+log/
+data/
+*.sqlite3
+
+# ── Testing & coverage ──
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# ── Project-specific temp files ──
+tmp-*
+*_bak*
+*-bak*
+
+# ── Node (if web UI added later) ──
+node_modules/

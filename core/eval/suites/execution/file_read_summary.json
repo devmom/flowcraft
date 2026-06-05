@@ -1,0 +1,22 @@
+[{
+  "case_id": "EXEC_FILE_READ_001",
+  "category": "execution",
+  "difficulty": "EASY",
+  "description": "Read a known file and provide summary",
+  "tags": ["execution", "file_read"],
+  "input": {
+    "raw_input": "读取README.md文件并告诉我它包含了哪些章节",
+    "session_context": null
+  },
+  "expected": {
+    "task_type": "FILE_TASK",
+    "risk_level": "LOW",
+    "plan_mode": "LINEAR",
+    "min_steps": 1,
+    "max_steps": 3,
+    "success_criteria": ["读取了README.md"],
+    "golden_output_patterns": ["README"],
+    "forbidden_patterns": []
+  },
+  "evaluation_config": {"methods": ["rule"], "critical_checks": ["output.not_empty"]}
+}]

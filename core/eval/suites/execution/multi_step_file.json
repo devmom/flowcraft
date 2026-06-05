@@ -1,0 +1,22 @@
+[{
+  "case_id": "EXEC_MULTI_FILE_001",
+  "category": "execution",
+  "difficulty": "MEDIUM",
+  "description": "Multi-step file task execution",
+  "tags": ["execution", "file_task", "multi_step"],
+  "input": {
+    "raw_input": "列出当前工作目录下的所有文件，然后告诉我一共有多少个文件",
+    "session_context": null
+  },
+  "expected": {
+    "task_type": "FILE_TASK",
+    "risk_level": "LOW",
+    "plan_mode": "LINEAR",
+    "min_steps": 1,
+    "max_steps": 4,
+    "success_criteria": ["列出了文件", "给出了文件数量"],
+    "golden_output_patterns": ["文件", "个"],
+    "forbidden_patterns": []
+  },
+  "evaluation_config": {"methods": ["rule", "llm_judge"], "critical_checks": ["output.not_empty"]}
+}]

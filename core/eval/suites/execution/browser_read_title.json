@@ -1,0 +1,22 @@
+[{
+  "case_id": "EXEC_BROWSER_READ_001",
+  "category": "execution",
+  "difficulty": "EASY",
+  "description": "Read a webpage title",
+  "tags": ["execution", "browser_read"],
+  "input": {
+    "raw_input": "打开http://example.com并告诉我网页标题是什么",
+    "session_context": null
+  },
+  "expected": {
+    "task_type": "BROWSER_TASK",
+    "risk_level": "LOW",
+    "plan_mode": "LINEAR",
+    "min_steps": 1,
+    "max_steps": 3,
+    "success_criteria": ["获取了网页标题"],
+    "golden_output_patterns": ["Example"],
+    "forbidden_patterns": []
+  },
+  "evaluation_config": {"methods": ["rule"], "critical_checks": ["output.not_empty"]}
+}]

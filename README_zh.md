@@ -39,7 +39,11 @@ FlowCraft 从零构建——**不依赖 LangChain、AutoGen、CrewAI、Semantic 
 
 ## 快速开始
 
-### 前置条件
+### Windows 免安装版
+
+从 [Releases](https://github.com/devmom/flowcraft/releases) 下载最新的便携包，解压后双击 `FlowCraft\FlowCraft.bat` 即可使用，浏览器自动打开，无需安装任何环境。
+
+### 源码安装前置条件
 
 - Python 3.12+
 - 一个 API Key：[DeepSeek](https://platform.deepseek.com/) 或 [Agnes AI](https://agnes-ai.com/) 或 [Ollama](https://ollama.com/) 本地模型

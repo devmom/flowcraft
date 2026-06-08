@@ -39,7 +39,11 @@ FlowCraft is built from scratch — **zero dependency on LangChain, AutoGen, Cre
 
 ## Quick Start
 
-### Prerequisites
+### Windows (no Python required)
+
+Download the latest portable package from [Releases](https://github.com/devmom/flowcraft/releases), extract, and double-click `FlowCraft\FlowCraft.bat`. The browser opens automatically — no installation needed.
+
+### Prerequisites (for source install)
 
 - Python 3.12+
 - An API key from [DeepSeek](https://platform.deepseek.com/) OR [Agnes AI](https://agnes-ai.com/) OR [Ollama](https://ollama.com/) (local)

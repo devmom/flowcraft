@@ -520,29 +520,30 @@ class Handler(BaseHTTPRequestHandler):
                 body = self._body()
                 # ── Model switching (supports DeepSeek, Agnes, Ollama) ──
                 requested_model = body.get("model", "")
+                switch_error = None
                 if requested_model and requested_model != app.model_gateway.current_model_id:
                     # Determine provider from model name
                     if "agnes" in requested_model:
                         provider = "agnes"
                         api_key = (app.secrets.get(f"model:agnes:{requested_model}:api_key")
-                                   or os.environ.get("AGNES_API_KEY")
-                                   # Also try saved Agnes key from settings
-                                   or app.secrets.get("model:agnes:agnes-2.0-flash:api_key"))
+                                   or app.secrets.get("model:agnes:__default__:api_key")
+                                   or os.environ.get("AGNES_API_KEY"))
                     else:
                         provider = "deepseek"
                         api_key = (app.secrets.get(f"model:deepseek:{requested_model}:api_key")
+                                   or app.secrets.get("model:deepseek:__default__:api_key")
                                    or os.environ.get("FLOWCRAFT_DEEPSEEK_API_KEY")
-                                   or os.environ.get("DEEPSEEK_API_KEY"))
-                    # IMPORTANT: Do NOT cross-provider fallback (DeepSeek key won't work on Agnes, etc.)
-                    if not api_key and provider == "deepseek":
-                        # Within DeepSeek: try current model's stored key
-                        api_key = app.secrets.get(f"model:deepseek:{app.model_gateway.current_model_id}:api_key")
+                                   or os.environ.get("DEEPSEEK_API_KEY")
+                                   # Within same provider: reuse current model's stored key
+                                   or app.secrets.get(f"model:deepseek:{app.model_gateway.current_model_id}:api_key"))
                     if not api_key:
-                        logging.warning("No API key for %s (provider=%s), switch skipped", requested_model, provider)
+                        switch_error = f"No API key for {requested_model}. Configure in Settings."
+                        logging.warning(switch_error)
                     else:
                         switched = app.model_gateway.switch_model(requested_model, api_key)
                         if not switched:
-                            logging.warning("Model switch to %s failed, using current model", requested_model)
+                            switch_error = f"Model switch to {requested_model} failed."
+                            logging.warning(switch_error)
                         else:
                             logging.info("Model switched to %s (provider=%s)", requested_model, provider)
 
@@ -553,7 +554,10 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 # 先创建任务，立即返回；执行在后台线程进行（流式体验）
                 task = asyncio.run(app.runtime.create_task_async(request))
-                self._json({"task_id": task.task_id, "status": task.status.value, "title": task.title})
+                resp = {"task_id": task.task_id, "status": task.status.value, "title": task.title}
+                if switch_error:
+                    resp["warning"] = switch_error
+                self._json(resp)
             except Exception as exc:
                 logging.exception("Task creation failed: %s", exc)
                 try:
@@ -644,9 +648,16 @@ class Handler(BaseHTTPRequestHandler):
                 "value_json": json.dumps(body, ensure_ascii=False),
                 "updated_at": _now_utc(),
             })
-            # Apply API key if provided
-            if body.get("api_key"):
-                app.secrets.set("model:deepseek:deepseek-v4-pro:api_key", body["api_key"])
+            # Apply API keys per provider
+            if body.get("deepseek_key"):
+                app.secrets.set("model:deepseek:__default__:api_key", body["deepseek_key"])
+                app.secrets.set("model:deepseek:deepseek-v4-pro:api_key", body["deepseek_key"])
+                app.secrets.set("model:deepseek:deepseek-v4-flash:api_key", body["deepseek_key"])
+            if body.get("agnes_key"):
+                app.secrets.set("model:agnes:__default__:api_key", body["agnes_key"])
+                app.secrets.set("model:agnes:agnes-2.0-flash:api_key", body["agnes_key"])
+            # Reconfigure model gateway immediately with new keys
+            app._auto_configure_model()
             self._json({"status": "ok"})
             return
 

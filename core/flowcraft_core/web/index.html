@@ -1701,7 +1701,8 @@
       <div style="display:flex;justify-content:space-between;margin-bottom:16px;"><strong>Settings</strong><button onclick="document.getElementById('settingsOverlay').remove()" style="background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:18px;">x</button></div>
       <div style="display:grid;gap:12px;">
         <div style="font-size:13px;color:var(--accent);font-weight:500;border-bottom:1px solid var(--border);padding-bottom:6px;">Cloud Model</div>
-        <label style="font-size:12px;color:var(--text-secondary);">API Key (DeepSeek/OpenAI)<input id="sApiKey" type="password" value="${esc(cur.api_key||'')}" placeholder="sk-..." style="width:100%;margin-top:4px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:4px;padding:8px;color:var(--text);"></label>
+        <label style="font-size:12px;color:var(--text-secondary);">DeepSeek API Key<input id="sDeepseekKey" type="password" value="${esc(cur.deepseek_key||'')}" placeholder="sk-..." style="width:100%;margin-top:4px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:4px;padding:8px;color:var(--text);"></label>
+        <label style="font-size:12px;color:var(--text-secondary);">Agnes AI API Key (free)<input id="sAgnesKey" type="password" value="${esc(cur.agnes_key||'')}" placeholder="sk-..." style="width:100%;margin-top:4px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:4px;padding:8px;color:var(--text);"></label>
         <div style="font-size:13px;color:var(--accent);font-weight:500;border-bottom:1px solid var(--border);padding-bottom:6px;margin-top:4px;">Local Model (Ollama)</div>
         <label style="font-size:12px;color:var(--text-secondary);">Ollama URL<input id="sOllamaUrl" type="text" value="${esc(cur.ollama_url||'http://localhost:11434')}" placeholder="http://localhost:11434" style="width:100%;margin-top:4px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:4px;padding:8px;color:var(--text);"></label>
         <label style="font-size:12px;color:var(--text-secondary);">Model Name<input id="sOllamaModel" type="text" value="${esc(cur.ollama_model||'qwen3')}" placeholder="qwen3 / llama4 / mistral" style="width:100%;margin-top:4px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:4px;padding:8px;color:var(--text);"></label>
@@ -1734,13 +1735,23 @@
   }
   async function saveSettings() {
     await fetch("/api/settings", {method:"POST",headers:{"Content-Type":"application/json; charset=utf-8"},body:JSON.stringify({
-      api_key:document.getElementById("sApiKey").value.trim(),
+      deepseek_key:document.getElementById("sDeepseekKey").value.trim(),
+      agnes_key:document.getElementById("sAgnesKey").value.trim(),
       workspace:document.getElementById("sWorkspace").value.trim(),
       ollama_url:document.getElementById("sOllamaUrl").value.trim(),
       ollama_model:document.getElementById("sOllamaModel").value.trim(),
     })});
     document.getElementById("settingsOverlay").remove();
-    alert("Saved! Restart server for changes to take effect.");
+    showToast("Settings saved.");
+  }
+
+  function showToast(msg) {
+    const t = document.createElement("div");
+    t.textContent = msg;
+    t.style.cssText = "position:fixed;top:16px;left:50%;transform:translateX(-50%);background:var(--green-dim);color:#fff;padding:10px 24px;border-radius:6px;font-size:13px;z-index:9999;opacity:0;transition:opacity 0.3s;pointer-events:none;";
+    document.body.appendChild(t);
+    requestAnimationFrame(() => { t.style.opacity = "1"; });
+    setTimeout(() => { t.style.opacity = "0"; setTimeout(() => t.remove(), 300); }, 2000);
   }
 
   // ── Workflow Save ───────────────────────────────────────

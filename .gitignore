@@ -64,3 +64,5 @@ tmp-*
 
 # ── Node (if web UI added later) ──
 node_modules/
+
+!packaging/windows/build.bat

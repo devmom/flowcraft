@@ -14,6 +14,7 @@ import asyncio as _asyncio
 import json
 import logging
 import time as _time
+from datetime import datetime, timezone
 
 from flowcraft_core.domain.enums import PlanMode, RiskLevel, TaskStatus
 from flowcraft_core.domain.schemas import ExecutionPlan, PlanStep, TaskBrief
@@ -30,10 +31,11 @@ REFINE_TIMEOUT = 20
 class Planner:
     """智能规划器：工具感知 + DAG自动检测 + 迭代求精."""
 
-    def __init__(self, model_gateway: ModelGateway, tool_registry=None, memory_manager=None) -> None:
+    def __init__(self, model_gateway: ModelGateway, tool_registry=None, memory_manager=None, skill_registry=None) -> None:
         self.model_gateway = model_gateway
         self.tool_registry = tool_registry
         self.memory_manager = memory_manager
+        self.skill_registry = skill_registry  # Phase 1: skill-aware planning
 
     # ── Public API ──────────────────────────────────────────
 
@@ -112,6 +114,11 @@ class Planner:
         tools_summary = self._get_tools_summary()
         context = self._get_planning_context(brief)
 
+        # Inject current date so search queries use the right year
+        now = datetime.now(timezone.utc)
+        now_str = now.strftime("%Y-%m-%d")
+        weekday = now.strftime("%A")
+
         prompt = f"""## 任务信息
 **目标**: {brief.objective}
 **类型**: {brief.task_type}
@@ -121,6 +128,7 @@ class Planner:
 **需要网络**: {'是' if brief.requires_network else '否'}
 **需要文件**: {'是' if brief.requires_local_files else '否'}
 **所需能力**: {', '.join(brief.required_capabilities) if brief.required_capabilities else '通用'}
+**当前日期**: {now_str} ({weekday})
 
 ## 可用工具（只能使用列表中的工具）
 {tools_summary}
@@ -143,6 +151,32 @@ class Planner:
    - FINALIZE = 汇总输出
    - 工具步骤的 required_tools 必须从「可用工具」列表中选择
    - 每个步骤写明 expected_output（预期产出）
+   - **涉及搜索/新闻/最新/当日等时间敏感任务时，必须使用当前日期 {now_str} 构建搜索词**
+
+2.5 **执行模式选择（execution_mode）**：
+   每个步骤必须指定 execution_mode 字段，选择逻辑如下：
+   | execution_mode | 使用场景 | 典型 tool_name |
+   |---|---|---|
+   | tool | 单个工具可完成 | exec, file.read, web_search, apply_patch |
+   | skill | 存在匹配的预定义技能 | skill.execute (设 skill_name) |
+   | dynamic_script | 多步数据处理、循环计算、格式转换 | (自动生成脚本) |
+   | model_answer | LLM直接生成文本 | (无需工具) |
+
+   **exec 工具的使用场景**：
+   - `exec`: 执行脚本文件 (python script.py)、安装包 (pip install)、git 操作、编译构建
+   - `apply_patch`: 对文件做精确的结构化修改（创建/更新/删除/补丁）
+   - ⚠ 禁止 python -c 内联执行 → 先用 file.write 写入脚本，再用 exec 运行
+
+   **选择 dynamic_script 的信号**（exec 做不到的纯计算任务）：
+   - 需要在沙箱中安全执行的不信任代码
+   - 纯数学/统计计算，不需要文件系统和网络
+   - 需要多次迭代尝试直到找到正确答案
+
+   **选择 exec vs dynamic_script 的判断**：
+   - 需要读写文件、装包、git、pip？→ exec (tool 模式)
+   - 只需要纯计算、数学、数据分析？→ dynamic_script 或 skill
+
+   **优先使用 skill**：如果上方「可用技能」列表中有匹配的技能，优先选择 skill（确定性执行，100% 可靠）。
 
 3. **复杂度自适应**：
    - 简单任务 1-3 步
@@ -210,6 +244,7 @@ class Planner:
 4. 步骤顺序是否合理？是否遗漏关键步骤？
 5. action_type 是否正确？TOOL步骤是否指定了 tool_name？
 6. 是否有不必要的步骤可以合并？
+7. execution_mode 是否合理？skill 模式是否指定了有效的 skill_name？
 
 如果计划质量良好，返回相同内容。如有改进，返回修正后的完整计划。
 只改进真正有问题的部分，不要无意义重排。"""
@@ -278,8 +313,11 @@ class Planner:
                             "expected_output": {"type": "string"},
                             "risk_level": {"type": "string", "enum": ["LOW", "MEDIUM", "HIGH", "CRITICAL"]},
                             "approval_required": {"type": "boolean"},
+                            "execution_mode": {"type": "string", "enum": ["tool", "skill", "dynamic_script", "model_answer"], "description": "How this step should be executed"},
+                            "skill_name": {"type": "string", "description": "Qualified skill name when execution_mode=skill"},
+                            "skill_params": {"type": "object", "description": "Parameters for skill script"},
                         },
-                        "required": ["index", "title", "objective", "action_type", "expected_output", "risk_level"],
+                        "required": ["index", "title", "objective", "action_type", "expected_output", "risk_level", "execution_mode"],
                     },
                 },
             },
@@ -287,16 +325,27 @@ class Planner:
         }
 
     def _get_tools_summary(self) -> str:
-        if not self.tool_registry:
-            return "（工具注册表不可用）"
-        defs = self.tool_registry.list_definitions()
-        lines = []
-        for d in sorted(defs, key=lambda x: x.get("category", "")):
-            lines.append(
-                f"- **{d['tool_name']}** [{d.get('risk_level', '?')}] "
-                f"({d.get('category', 'general')}): {d.get('description', '')[:120]}"
-            )
-        return "\n".join(lines)
+        """获取可用工具和技能的摘要."""
+        parts = []
+        if self.tool_registry:
+            defs = self.tool_registry.list_definitions()
+            lines = []
+            for d in sorted(defs, key=lambda x: x.get("category", "")):
+                lines.append(
+                    f"- **{d['tool_name']}** [{d.get('risk_level', '?')}] "
+                    f"({d.get('category', 'general')}): {d.get('description', '')[:120]}"
+                )
+            if lines:
+                parts.append("## 可用工具\n" + "\n".join(lines))
+
+        if self.skill_registry:
+            try:
+                skills_summary = self.skill_registry.get_skills_summary()
+                if skills_summary and skills_summary != "(No skills available)":
+                    parts.append("## 可用技能（确定性脚本）\n" + skills_summary)
+            except Exception:
+                pass
+        return "\n\n".join(parts) if parts else "（工具注册表不可用）"
 
     def _get_planning_context(self, brief: TaskBrief) -> str:
         """注入会话历史上下文辅助规划."""
@@ -325,6 +374,13 @@ class Planner:
                 tools = list(sd.get("required_tools", []))
                 tools.append(sd["tool_name"])
                 sd["required_tools"] = tools
+            # Phase 1: set defaults for new fields
+            sd.setdefault("execution_mode", "tool")
+            sd.setdefault("skill_name", None)
+            sd.setdefault("skill_params", {})
+            # Auto-detect execution_mode from action_type if not set
+            if sd.get("action_type") == "MODEL_ANSWER" and sd.get("execution_mode") == "tool":
+                sd["execution_mode"] = "model_answer"
             steps.append(PlanStep(**sd))
         plan = ExecutionPlan(
             task_id=brief.task_id,

@@ -21,12 +21,59 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# Budget settings
-CONTEXT_BUDGET = 12000
-CRITICAL_BUDGET = 4000   # task goal + current step (preserved)
-HIGH_PRIORITY_BUDGET = 6000  # + recent observations
-MEDIUM_BUDGET = 9000     # + session memory
-# Rest up to 12000 for older content
+# Budget settings — now dynamic, keyed off model context window.
+# Static fallback used only when model gateway unavailable.
+FALLBACK_CONTEXT_CHARS = 32000  # generous default for unknown models
+CONTEXT_WINDOW_USAGE_RATIO = 0.80  # reserve 20% for LLM output
+
+# Priority budgets within total context window (as ratios of total)
+CRITICAL_RATIO = 0.30   # task goal + current step = 30% of budget
+HIGH_RATIO = 0.50       # + recent observations = cumulative 50%
+MEDIUM_RATIO = 0.75     # + session memory = cumulative 75%
+# Remaining 25% for older / long-term content
+
+
+def get_context_budget(model_gateway: Any | None = None) -> int:
+    """Compute context budget in characters, based on the active model's context window.
+
+    Uses the model's advertised context_window (tokens) × 80% to leave
+    room for the LLM's own output, then converts tokens → characters
+    using a conservative ~2.5 chars/token for Chinese+English mixed text.
+
+    Falls back to FALLBACK_CONTEXT_CHARS when model info is unavailable.
+    """
+    if model_gateway is None:
+        return FALLBACK_CONTEXT_CHARS
+
+    # Try to read from adapter profile
+    context_window_tokens = _get_model_context_window(model_gateway)
+    if context_window_tokens is None:
+        return FALLBACK_CONTEXT_CHARS
+
+    usable_tokens = int(context_window_tokens * CONTEXT_WINDOW_USAGE_RATIO)
+    # Tokens → characters: ~2.5 for CJK-majority, ~4 for English-majority.
+    # Use 2.5 as conservative (fewer chars) to stay safe.
+    budget_chars = usable_tokens * 2.5
+
+    # Cap at a sane max so we don't accidentally try to stuff
+    # 2 million chars into a prompt.  384K chars ≈ 154K tokens is
+    # the practical upper bound for most agent contexts.
+    return min(int(budget_chars), 384_000)
+
+
+def _get_model_context_window(model_gateway: Any) -> int | None:
+    """Extract context window size from the active model profile."""
+    # Try _profile (Pydantic ModelProfile)
+    profile = getattr(model_gateway, '_profile', None)
+    if profile and hasattr(profile, 'context_window'):
+        return profile.context_window
+    # Try _adapter.profile
+    adapter = getattr(model_gateway, '_adapter', None)
+    if adapter:
+        profile = getattr(adapter, 'profile', None)
+        if profile and hasattr(profile, 'context_window'):
+            return profile.context_window
+    return None
 
 # Content markers
 MARKER_TASK_START = "## 原始任务"
@@ -36,16 +83,29 @@ MARKER_SESSION = "## 会话历史记忆"
 MARKER_PRIOR_STEPS = "## 已完成步骤的输出"
 
 
-def smart_truncate(context: str, max_chars: int = CONTEXT_BUDGET) -> str:
-    """Intelligently truncate context, preserving critical sections.
+def smart_truncate(
+    context: str,
+    max_chars: int | None = None,
+    model_gateway: Any | None = None,
+) -> str:
+    """Intelligently truncate context using priority-ordered budget filling.
+
+    Budget is determined (in order of precedence):
+        1. Explicit max_chars argument
+        2. Model's context_window × 80% from model_gateway
+        3. FALLBACK_CONTEXT_CHARS (32,000)
 
     Strategy:
-        1. If under budget, return as-is
-        2. Preserve task goal + current step (CRITICAL)
-        3. Preserve recent tool observations (HIGH)
-        4. Truncate/compress session history and older steps (LOW)
-        5. Add truncation notice summarizing what was removed
+        - If under budget, return as-is
+        - Fill by priority: CRITICAL → HIGH → MEDIUM → LOW
+        - CRITICAL (task goal, current step): always keep full
+        - HIGH (recent observations): keep full, truncate per-observation if needed
+        - MEDIUM (session history, prior step outputs): compress, keep titles
+        - LOW (older content): only include if budget allows
     """
+    if max_chars is None:
+        max_chars = get_context_budget(model_gateway)
+
     if len(context) <= max_chars:
         return context
 
@@ -71,7 +131,7 @@ def smart_truncate(context: str, max_chars: int = CONTEXT_BUDGET) -> str:
     result_parts: list[str] = []
     budget = max_chars
 
-    # CRITICAL: always include fully
+    # CRITICAL: always include fully (up to budget)
     for part in critical:
         if len(part) <= budget:
             result_parts.append(part)
@@ -81,7 +141,7 @@ def smart_truncate(context: str, max_chars: int = CONTEXT_BUDGET) -> str:
             budget = 0
             break
 
-    # HIGH: include fully if possible
+    # HIGH: include fully if possible, otherwise truncate individual observations
     for part in high:
         if budget <= 200:
             break
@@ -89,12 +149,11 @@ def smart_truncate(context: str, max_chars: int = CONTEXT_BUDGET) -> str:
             result_parts.append(part)
             budget -= len(part)
         else:
-            # Truncate individual observations
             truncated = _truncate_observations(part, budget - 100)
             result_parts.append(truncated)
             budget = 100
 
-    # MEDIUM: compress session history by keeping only titles
+    # MEDIUM: compress by keeping only titles / first lines
     for part in medium:
         if budget <= 100:
             break
@@ -106,7 +165,7 @@ def smart_truncate(context: str, max_chars: int = CONTEXT_BUDGET) -> str:
             result_parts.append(compressed)
             budget = 100
 
-    # LOW: only include if significant budget remains
+    # LOW: only included if significant budget remains
     for part in low:
         if budget <= 200:
             break
@@ -137,17 +196,16 @@ async def llm_summarize_context(
     context: str,
     model_gateway: Any,  # ModelGateway
     task_objective: str,
-    max_chars: int = CONTEXT_BUDGET,
+    max_chars: int | None = None,
 ) -> str:
     """Use LLM to intelligently summarize overflowing context.
 
-    When context exceeds budget, ask the model to:
-    1. Keep the task goal and current step intact
-    2. Summarize historical observations into key findings
-    3. Condense session memory to essential facts
-
+    Budget auto-detected from model_gateway's context window if not explicit.
     Falls back to smart_truncate if LLM is unavailable.
     """
+    if max_chars is None:
+        max_chars = get_context_budget(model_gateway)
+
     if len(context) <= max_chars:
         return context
 

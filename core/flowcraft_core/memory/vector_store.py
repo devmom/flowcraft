@@ -1,13 +1,12 @@
-"""Keyword-Vector Memory Store — zero-dependency semantic retrieval.
+"""Vector Memory Store — Chroma-powered semantic retrieval with TF-IDF fallback.
 
-Uses TF-IDF weighted keyword vectors for memory similarity search.
-No external embedding service required. Fast, local, deterministic.
+Primary:  ChromaDB with all-MiniLM-L6-v2 embeddings (semantic search)
+Fallback: TF-IDF keyword vectors (zero-dependency, deterministic)
 
 Architecture:
-    1. Tokenize memory content into keyword vectors (jieba-like segmentation fallback)
-    2. Build inverted index: keyword → [memory_ids]
-    3. Query: tokenize query → BM25-style scoring → ranked results
-    4. Auto-prune: remove memories below relevance threshold
+    get_vector_store() → auto-detects Chroma availability
+        ├── Chroma available → ChromaVectorStore (embeddings + cosine similarity)
+        └── Chroma unavailable → KeywordVectorStore (TF-IDF + BM25)
 """
 
 from __future__ import annotations
@@ -15,10 +14,12 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -305,13 +306,277 @@ class KeywordVectorStore:
         return len(self._inverted_index)
 
 
+# ── Chroma Vector Store ────────────────────────────────────────
+
+
+# Cache for Chroma import check
+_chroma_available: bool | None = None
+
+
+def _is_chroma_available() -> bool:
+    """Check if chromadb is installed and importable."""
+    global _chroma_available
+    if _chroma_available is not None:
+        return _chroma_available
+    try:
+        import chromadb  # noqa: F401
+        _chroma_available = True
+    except ImportError:
+        _chroma_available = False
+        logger.info("chromadb not installed — using TF-IDF keyword vector store")
+    return _chroma_available
+
+
+def _get_chroma_persist_dir() -> str:
+    """Get the ChromaDB persistence directory under FlowCraft data dir."""
+    data_dir = os.environ.get("FLOWCRAFT_DATA_DIR", "")
+    if not data_dir:
+        data_dir = os.path.join(
+            os.environ.get("APPDATA", os.path.expanduser("~/.local/share")),
+            "FlowCraft",
+        )
+    chroma_dir = os.path.join(data_dir, "data", "chroma")
+    os.makedirs(chroma_dir, exist_ok=True)
+    return chroma_dir
+
+
+class ChromaVectorStore:
+    """ChromaDB-powered vector store for semantic memory retrieval.
+
+    Uses the all-MiniLM-L6-v2 embedding model (via Chroma's built-in
+    sentence-transformers integration) to encode memory content into
+    384-dimensional vectors.  Search is cosine-similarity based.
+
+    Public API is intentionally identical to KeywordVectorStore so the
+    two are drop-in interchangeable.
+    """
+
+    # Chroma collection name — single collection stores all memory types;
+    # filtering by scope_id / memory_type is done via Chroma metadata filters.
+    COLLECTION_NAME = "flowcraft_memories"
+
+    # Decay config (mirrors KeywordVectorStore)
+    decay_half_life_hours: float = 24.0
+    min_decay_factor: float = 0.1
+    relevance_threshold: float = 0.05
+
+    def __init__(self, persist_directory: str | None = None) -> None:
+        import chromadb
+        from chromadb.config import Settings as ChromaSettings
+
+        persist_dir = persist_directory or _get_chroma_persist_dir()
+        self._client = chromadb.PersistentClient(
+            path=persist_dir,
+            settings=ChromaSettings(anonymized_telemetry=False),
+        )
+        # Use Chroma's default embedding function (all-MiniLM-L6-v2)
+        self._collection = self._client.get_or_create_collection(
+            name=self.COLLECTION_NAME,
+            metadata={"hnsw:space": "cosine"},
+        )
+        self._memories: dict[str, IndexedMemory] = {}
+        logger.info(
+            "ChromaVectorStore initialized at %s (%d docs)",
+            persist_dir, self._collection.count(),
+        )
+
+    # ── CRUD ─────────────────────────────────────────────────
+
+    def index(self, memory: IndexedMemory) -> None:
+        """Add or update a memory in the Chroma collection."""
+        doc_id = memory.memory_id
+        text = f"{memory.title}\n{memory.content}"
+
+        # Build metadata for filtering
+        metadata = {
+            "memory_type": memory.memory_type,
+            "scope_id": memory.scope_id,
+            "title": memory.title[:500],
+            "created_at": memory.created_at,
+            "confidence": memory.confidence,
+        }
+
+        # Chroma upsert: if doc_id exists it updates, otherwise inserts
+        self._collection.upsert(
+            ids=[doc_id],
+            documents=[text],
+            metadatas=[metadata],
+        )
+        self._memories[doc_id] = memory
+        logger.debug("Chroma indexed memory %s", doc_id[:12])
+
+    def remove(self, memory_id: str) -> None:
+        """Remove a memory from the Chroma collection."""
+        self._memories.pop(memory_id, None)
+        try:
+            self._collection.delete(ids=[memory_id])
+        except Exception:
+            logger.debug("Chroma delete failed for %s (may not exist)", memory_id[:12])
+
+    # ── Search ───────────────────────────────────────────────
+
+    def search(
+        self,
+        query: str,
+        scope_id: str | None = None,
+        memory_type: str | None = None,
+        top_k: int = 20,
+        min_score: float | None = None,
+    ) -> list[IndexedMemory]:
+        """Search Chroma for memories semantically similar to query.
+
+        Args:
+            query: natural language query
+            scope_id: optional filter by scope (session_id)
+            memory_type: optional filter by type
+            top_k: max results
+            min_score: override relevance threshold (cosine distance → similarity)
+
+        Returns:
+            list of IndexedMemory, ranked by relevance (highest first)
+        """
+        threshold = min_score if min_score is not None else self.relevance_threshold
+
+        # Build Chroma where-filter
+        where_filter: dict[str, Any] | None = None
+        conditions: list[dict[str, Any]] = []
+        if scope_id:
+            conditions.append({"scope_id": scope_id})
+        if memory_type:
+            conditions.append({"memory_type": memory_type})
+        if len(conditions) == 1:
+            where_filter = conditions[0]
+        elif len(conditions) >= 2:
+            where_filter = {"$and": conditions}
+
+        try:
+            chroma_results = self._collection.query(
+                query_texts=[query],
+                n_results=min(top_k * 2, 200),  # fetch extra for post-filtering
+                where=where_filter,
+                include=["documents", "metadatas", "distances"],
+            )
+        except Exception as exc:
+            logger.warning("Chroma query failed: %s", exc)
+            return []
+
+        if not chroma_results or not chroma_results.get("ids") or not chroma_results["ids"][0]:
+            return []
+
+        ids = chroma_results["ids"][0]
+        distances = chroma_results.get("distances", [[1.0] * len(ids)])[0]
+
+        # Convert cosine distance → similarity (1 - distance), then apply decay
+        results: list[tuple[float, IndexedMemory]] = []
+        now = datetime.now(timezone.utc)
+
+        for doc_id, distance in zip(ids, distances):
+            mem = self._memories.get(doc_id)
+            if not mem:
+                # Memory is in Chroma but not in local cache — create lightweight wrapper
+                metadatas = chroma_results.get("metadatas", [[]])[0]
+                idx = ids.index(doc_id)
+                meta = metadatas[idx] if idx < len(metadatas) else {}
+                mem = IndexedMemory(
+                    memory_id=doc_id,
+                    memory_type=meta.get("memory_type", "SESSION"),
+                    scope_id=meta.get("scope_id", ""),
+                    title=meta.get("title", ""),
+                    content="",
+                    created_at=meta.get("created_at", ""),
+                    confidence=meta.get("confidence", 1.0),
+                )
+
+            # Cosine similarity = 1 - cosine_distance (Chroma returns distances)
+            cosine_sim = max(0.0, 1.0 - distance)
+            self._apply_decay(mem, now)
+            effective = cosine_sim * mem.effective_score
+
+            if effective >= threshold:
+                results.append((effective, mem))
+
+        results.sort(key=lambda x: x[0], reverse=True)
+        return [mem for _, mem in results[:top_k]]
+
+    # ── Decay ────────────────────────────────────────────────
+
+    def _apply_decay(self, memory: IndexedMemory, now: datetime | None = None) -> None:
+        """Apply exponential time decay (same logic as KeywordVectorStore)."""
+        if now is None:
+            now = datetime.now(timezone.utc)
+        try:
+            created = datetime.fromisoformat(memory.created_at.replace("Z", "+00:00"))
+            age_hours = (now - created).total_seconds() / 3600.0
+            if age_hours <= 0:
+                memory.decay_factor = 1.0
+            else:
+                memory.decay_factor = max(
+                    self.min_decay_factor,
+                    math.pow(2.0, -age_hours / self.decay_half_life_hours),
+                )
+        except (ValueError, TypeError):
+            memory.decay_factor = 1.0
+
+    def apply_decay_all(self) -> int:
+        """Apply decay to all cached memories. Returns count of pruned."""
+        now = datetime.now(timezone.utc)
+        to_remove: list[str] = []
+        for mem_id, mem in self._memories.items():
+            self._apply_decay(mem, now)
+            if mem.decay_factor <= self.min_decay_factor * 0.5:
+                to_remove.append(mem_id)
+        for mid in to_remove:
+            self.remove(mid)
+        logger.debug("Chroma decay applied: %d memories pruned", len(to_remove))
+        return len(to_remove)
+
+    # ── Stats ────────────────────────────────────────────────
+
+    @property
+    def total_indexed(self) -> int:
+        return self._collection.count()
+
+    @property
+    def total_keywords(self) -> int:
+        """Chroma has no keyword count — return collection size as proxy."""
+        return self._collection.count()
+
+
 # ── Singleton ──────────────────────────────────────────────────
 
-_vector_store: KeywordVectorStore | None = None
+_vector_store: KeywordVectorStore | ChromaVectorStore | None = None
+_store_type: str = ""
 
 
-def get_vector_store() -> KeywordVectorStore:
-    global _vector_store
-    if _vector_store is None:
-        _vector_store = KeywordVectorStore()
+def get_vector_store() -> KeywordVectorStore | ChromaVectorStore:
+    """Get the vector store singleton.
+
+    Auto-detects Chroma availability:
+    - Chroma installed → ChromaVectorStore (semantic search)
+    - Chroma not installed → KeywordVectorStore (TF-IDF fallback)
+    """
+    global _vector_store, _store_type
+    if _vector_store is not None:
+        return _vector_store
+
+    if _is_chroma_available():
+        try:
+            _vector_store = ChromaVectorStore()
+            _store_type = "chroma"
+            logger.info("Vector store: ChromaDB (semantic embeddings)")
+            return _vector_store
+        except Exception as exc:
+            logger.warning("Chroma init failed, falling back to TF-IDF: %s", exc)
+
+    _vector_store = KeywordVectorStore()
+    _store_type = "tfidf"
+    logger.info("Vector store: TF-IDF (keyword vectors)")
     return _vector_store
+
+
+def get_store_type() -> str:
+    """Return the active vector store type: 'chroma' or 'tfidf'."""
+    global _store_type
+    if not _store_type:
+        get_vector_store()
+    return _store_type

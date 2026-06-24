@@ -14,7 +14,7 @@ class Settings:
     database_path: Path
     allowed_paths: list[Path]
     app_name: str = "FlowCraft"
-    version: str = "0.1.0"
+    version: str = "0.1.2"
     host: str = "127.0.0.1"
     port: int = 8765
 
@@ -27,6 +27,7 @@ class Settings:
     workflows_dir: Path = field(init=False)
     knowledge_dir: Path = field(init=False)
     temp_dir: Path = field(init=False)
+    skills_dir: Path = field(init=False)  # Phase 1: skill templates root
 
     def __post_init__(self) -> None:
         self.config_dir = self.data_dir / "config"
@@ -117,12 +118,81 @@ def default_data_dir() -> Path:
     return Path.home() / ".local" / "share" / "flowcraft"
 
 
+def _detect_project_root() -> Path | None:
+    """Detect FlowCraft project root from cwd.
+
+    If running from inside a FlowCraft project (e.g., D:/work/FlowCraft/core),
+    return the project root (D:/work/FlowCraft). Otherwise return None.
+
+    Walks UP from cwd, looking for the outermost directory that:
+      - Contains core/flowcraft_core/ (source tree) OR
+      - Contains TechnicalArchitecture/ and core/ (monorepo root)
+    The outermost match is the project root — not a subdirectory of it.
+    """
+    cwd = Path.cwd()
+    best: Path | None = None
+
+    for ancestor in [cwd] + list(cwd.parents):
+        has_core = (ancestor / "core").is_dir()
+        has_docs = (ancestor / "TechnicalArchitecture").is_dir()
+
+        # Monorepo root: has core/ + TechnicalArchitecture/
+        if has_core and has_docs:
+            best = ancestor
+
+        # Standalone: has flowcraft_core/ directly
+        if (ancestor / "flowcraft_core").is_dir():
+            if best is None:
+                best = ancestor
+
+    return best
+
+
 def load_settings() -> Settings:
     data_dir = Path(os.environ.get("FLOWCRAFT_DATA_DIR", default_data_dir()))
-    workspace = Path(os.environ.get("FLOWCRAFT_WORKSPACE", Path.cwd()))
+
+    # Determine workspace: env var > FlowCraft project root > cwd
+    workspace_env = os.environ.get("FLOWCRAFT_WORKSPACE")
+    if workspace_env:
+        workspace = Path(workspace_env)
+    else:
+        project_root = _detect_project_root()
+        if project_root:
+            # Use a dedicated workspace dir at the project root level
+            workspace = project_root / "workspace"
+        else:
+            workspace = Path.cwd()
+
+    # Ensure the workspace directory exists
+    workspace.mkdir(parents=True, exist_ok=True)
+
+    # Build allowed_paths: workspace + data_dir artifacts (for task outputs)
+    allowed_paths = [workspace.resolve()]
+    artifacts_dir = data_dir / "artifacts"
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    if artifacts_dir.resolve() not in [p.resolve() for p in allowed_paths]:
+        allowed_paths.append(artifacts_dir.resolve())
+
+    # Determine skills directory: env var > project root > workspace
+    skills_env = os.environ.get("FLOWCRAFT_SKILLS_DIR")
+    if skills_env:
+        skills_dir = Path(skills_env)
+    else:
+        project_root = _detect_project_root()
+        if project_root:
+            skills_dir = project_root / "skills"
+        else:
+            skills_dir = workspace / "skills"
+    skills_dir.mkdir(parents=True, exist_ok=True)
+    # Also ensure sub-dirs for marketplace and agent-generated skills
+    (skills_dir.parent / "skills_generated").mkdir(parents=True, exist_ok=True)
+    (skills_dir.parent / "skills_marketplace").mkdir(parents=True, exist_ok=True)
+
     settings = Settings(
         data_dir=data_dir,
         database_path=data_dir / "data" / "flowcraft.db",
-        allowed_paths=[workspace.resolve()],
+        allowed_paths=allowed_paths,
     )
+    settings.skills_dir = skills_dir
+    settings.__dict__["skills_dir"] = skills_dir  # bypass frozen dataclass
     return settings

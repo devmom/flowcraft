@@ -15,7 +15,7 @@ set "PYTHON_EMBED_ZIP=python-%PYTHON_VERSION%-embed-amd64.zip"
 set "PYTHON_DOWNLOAD_URL=https://www.python.org/ftp/python/%PYTHON_VERSION%/%PYTHON_EMBED_ZIP%"
 set "STAGING_DIR=release\FlowCraft-Portable"
 set "RELEASE_DIR=%STAGING_DIR%\FlowCraft"
-set "PACKAGE_NAME=FlowCraft-v0.1.0-portable-windows-x64"
+set "PACKAGE_NAME=FlowCraft-v0.1.2-portable-windows-x64"
 set "OUTPUT_ZIP=%~dp0%PACKAGE_NAME%.zip"
 set "BUILD_CACHE=%TEMP%\flowcraft-build"
 
@@ -109,13 +109,15 @@ if %errorlevel% neq 0 (
 
 :: Install project dependencies
 echo   Installing Python packages...
-"%PYTHON_RUNTIME_DIR%\python.exe" -m pip install pydantic fastapi uvicorn httpx --quiet --no-warn-script-location
+"%PYTHON_RUNTIME_DIR%\python.exe" -m pip install pydantic fastapi uvicorn httpx chromadb pyyaml --quiet --no-warn-script-location
 if %errorlevel% neq 0 (
     echo   [WARNING] Batch install failed. Installing individually...
     "%PYTHON_RUNTIME_DIR%\python.exe" -m pip install pydantic --quiet --no-warn-script-location
     "%PYTHON_RUNTIME_DIR%\python.exe" -m pip install fastapi --quiet --no-warn-script-location
     "%PYTHON_RUNTIME_DIR%\python.exe" -m pip install uvicorn --quiet --no-warn-script-location
     "%PYTHON_RUNTIME_DIR%\python.exe" -m pip install httpx --quiet --no-warn-script-location
+    "%PYTHON_RUNTIME_DIR%\python.exe" -m pip install chromadb --quiet --no-warn-script-location
+    "%PYTHON_RUNTIME_DIR%\python.exe" -m pip install pyyaml --quiet --no-warn-script-location
 )
 
 ::  Step 6: Copy Source 
@@ -144,7 +146,7 @@ echo @echo off
 echo cd /d "%%~dp0core"
 echo.
 echo echo   ========================================
-echo echo     Flow^^^&Craft v0.1.0
+echo echo     Flow^^^&Craft v0.1.2
 echo echo   ========================================
 echo echo.
 echo :: Quick pre-check: can Python even run?

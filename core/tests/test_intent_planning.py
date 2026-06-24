@@ -228,3 +228,120 @@ class TestPlannerHeuristic:
         assert isinstance(plan, ExecutionPlan)
         assert len(plan.steps) == 1
         assert plan.steps[0].action_type == "MODEL_ANSWER"
+
+
+# ═══════════════════════════════════════════════════════════════
+# C4: Planner LLM path tests
+# ═══════════════════════════════════════════════════════════════
+
+class TestPlannerLLMPath:
+    """TC-C4: Planner with live model gateway (mocked LLM)."""
+
+    @pytest.fixture
+    def mock_live_gateway(self) -> MagicMock:
+        gw = MagicMock()
+        gw.is_live.return_value = True
+        gw._adapter = MagicMock()
+        gw._adapter.structured_chat = AsyncMock(return_value={
+            "mode": "LINEAR",
+            "goal": "Test plan goal",
+            "steps": [
+                {"index": 1, "title": "Prepare", "objective": "准备",
+                 "action_type": "PREPARE", "required_tools": [],
+                 "expected_output": "ready", "risk_level": "LOW",
+                 "approval_required": False},
+                {"index": 2, "title": "Execute", "objective": "执行",
+                 "action_type": "TOOL", "required_tools": ["file.read"],
+                 "expected_output": "result", "risk_level": "LOW",
+                 "approval_required": False},
+                {"index": 3, "title": "Finalize", "objective": "汇总",
+                 "action_type": "FINALIZE", "required_tools": [],
+                 "expected_output": "summary", "risk_level": "LOW",
+                 "approval_required": False},
+            ],
+            "constraints": [], "success_criteria": ["done"],
+            "risk_points": [], "approval_points": [],
+            "fallback_strategy": {}, "stop_conditions": [],
+        })
+        return gw
+
+    @pytest.mark.unit
+    def test_create_plan_with_live_model(self, mock_live_gateway) -> None:
+        """When model is live, LLM-generated plan is used."""
+        planner = Planner(mock_live_gateway)
+        brief = TaskBrief(
+            task_id="t_llm1", objective="Analyze the codebase",
+            task_type="FILE_TASK", risk_level=RiskLevel.MEDIUM,
+        )
+        plan = asyncio.run(planner.create_plan(brief))
+        assert isinstance(plan, ExecutionPlan)
+        assert plan.mode == PlanMode.LINEAR
+        assert len(plan.steps) == 3
+        assert plan.steps[0].action_type == "PREPARE"
+        assert plan.steps[1].action_type == "TOOL"
+        assert plan.steps[2].action_type == "FINALIZE"
+
+    @pytest.mark.unit
+    def test_create_plan_timeout_falls_back(self, mock_live_gateway) -> None:
+        """LLM timeout triggers heuristic fallback."""
+        mock_live_gateway._adapter.structured_chat = AsyncMock(
+            side_effect=asyncio.TimeoutError())
+        mock_live_gateway._heuristic_plan.return_value = {
+            "mode": "DIRECT", "goal": "Heuristic fallback",
+            "steps": [{"index": 1, "title": "Answer", "objective": "test",
+                       "action_type": "MODEL_ANSWER", "required_tools": [],
+                       "expected_output": "answer", "risk_level": "LOW",
+                       "approval_required": False}],
+        }
+        planner = Planner(mock_live_gateway)
+        brief = TaskBrief(
+            task_id="t_to1", objective="Test timeout",
+            task_type="QA", risk_level=RiskLevel.LOW,
+        )
+        plan = asyncio.run(planner.create_plan(brief))
+        assert isinstance(plan, ExecutionPlan)
+        mock_live_gateway._heuristic_plan.assert_called_once()
+
+    @pytest.mark.unit
+    def test_create_plan_llm_exception_falls_back(self, mock_live_gateway) -> None:
+        """LLM exception triggers heuristic fallback."""
+        mock_live_gateway._adapter.structured_chat = AsyncMock(
+            side_effect=RuntimeError("API unavailable"))
+        mock_live_gateway._heuristic_plan.return_value = {
+            "mode": "DIRECT", "goal": "Exception fallback",
+            "steps": [{"index": 1, "title": "Answer", "objective": "test",
+                       "action_type": "MODEL_ANSWER", "required_tools": [],
+                       "expected_output": "answer", "risk_level": "LOW",
+                       "approval_required": False}],
+        }
+        planner = Planner(mock_live_gateway)
+        brief = TaskBrief(
+            task_id="t_ex1", objective="Test exception",
+            task_type="QA", risk_level=RiskLevel.LOW,
+        )
+        plan = asyncio.run(planner.create_plan(brief))
+        assert isinstance(plan, ExecutionPlan)
+        mock_live_gateway._heuristic_plan.assert_called_once()
+
+    @pytest.mark.unit
+    def test_plan_with_few_steps_skips_refinement(self, mock_live_gateway) -> None:
+        """Plans with < 3 steps skip the refinement phase."""
+        mock_live_gateway._adapter.structured_chat = AsyncMock(return_value={
+            "mode": "DIRECT", "goal": "Simple plan",
+            "steps": [
+                {"index": 1, "title": "Answer", "objective": "回答",
+                 "action_type": "MODEL_ANSWER", "required_tools": [],
+                 "expected_output": "answer", "risk_level": "LOW",
+                 "approval_required": False},
+            ],
+            "constraints": [], "success_criteria": ["answered"],
+            "risk_points": [], "approval_points": [],
+            "fallback_strategy": {}, "stop_conditions": [],
+        })
+        planner = Planner(mock_live_gateway)
+        brief = TaskBrief(
+            task_id="t_s1", objective="Simple QA",
+            task_type="QA", risk_level=RiskLevel.LOW,
+        )
+        plan = asyncio.run(planner.create_plan(brief))
+        assert len(plan.steps) == 1  # Refinement skipped for < 3 steps

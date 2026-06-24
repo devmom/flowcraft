@@ -306,7 +306,7 @@ class RuntimeEngine:
 
         try:
             # Start the builder session
-            builder_result = self.workflow_builder.start(
+            builder_result = await self.workflow_builder.start(
                 user_input=request.raw_input,
             )
 
@@ -419,6 +419,9 @@ class RuntimeEngine:
         try:
             # 1. 意图识别
             brief = await self.intent_engine.recognize(task.task_id, request)
+            # Evaluate thinking mode based on task intent
+            from flowcraft_core.intent.thinking_evaluator import evaluate_task_thinking
+            brief.thinking_mode = evaluate_task_thinking(brief)
             task.status = TaskStatus.INTENT_RECOGNIZED
             task.task_type = brief.task_type
             task.risk_level = brief.risk_level

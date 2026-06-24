@@ -34,6 +34,21 @@ from flowcraft_core.domain.enums import RiskLevel
 
 logger = logging.getLogger(__name__)
 
+# ── Sufficiency threshold for early exit ──────────────────────
+# If the user has provided info covering all these areas, stop asking
+# and generate the workflow immediately.  Thresholds are now
+# complexity-dependent; these are the defaults used when complexity
+# hasn't been assessed yet or LLM is unavailable.
+DEFAULT_REQUIRED_AREAS = 3      # for MODERATE workflows
+SIMPLE_REQUIRED_AREAS = 2       # for SIMPLE workflows (just goal + one other)
+COMPLEX_REQUIRED_AREAS = 4      # for COMPLEX workflows (need all 4 areas)
+MAX_TURNS_SIMPLE = 4
+MAX_TURNS_MODERATE = 6          # never exceed this many Q&A turns
+MAX_TURNS_COMPLEX = 8
+# Legacy alias (used as fallback when complexity is unknown)
+MIN_REQUIRED_AREAS = DEFAULT_REQUIRED_AREAS
+MAX_TURNS_BEFORE_FORCE_GENERATE = MAX_TURNS_MODERATE
+
 # ── Builder Session ──────────────────────────────────────────
 
 BUILDER_STAGES = [
@@ -51,6 +66,7 @@ BUILDER_STAGES = [
 GENERATE_TIMEOUT = 35.0   # seconds for LLM workflow generation
 MODIFY_TIMEOUT = 35.0     # seconds for LLM workflow modification
 CONVERSATION_TIMEOUT = 25.0  # seconds for LLM conversation turn
+START_TIMEOUT = 10.0      # seconds for LLM first-turn message
 
 
 @dataclass
@@ -64,6 +80,9 @@ class BuilderSession:
     inputs_info: dict[str, Any] = field(default_factory=dict)
     process_info: dict[str, Any] = field(default_factory=dict)
     output_info: dict[str, Any] = field(default_factory=dict)
+    # Complexity assessment (set by LLM on first turn)
+    complexity: str = "MODERATE"       # SIMPLE | MODERATE | COMPLEX
+    max_questions_needed: int = 2      # number of clarifying questions expected
     # Generated workflow preview
     workflow_preview: dict[str, Any] | None = None
     # History
@@ -92,40 +111,81 @@ class BuilderSession:
 def _build_conversation_prompt(session: BuilderSession, tools_summary: str) -> str:
     """Build the prompt for the LLM to generate the next conversation turn.
 
-    This is the core prompt that drives the guided conversation.  The LLM is
-    asked to respond with (a) a natural-language message to the user and (b)
-    structured extracted info that advances the builder stage machine.
+    Uses Socratic questioning: instead of rushing through a data-collection
+    checklist, the assistant probes the user's thinking — challenging
+    assumptions, exploring edge cases, surfacing hidden requirements, and
+    helping the user discover what they *really* need.
     """
     conv_text = "\n".join(
         f"{'User' if m['role'] == 'user' else 'Assistant'}: {m['content']}"
         for m in session.conversation[-10:]
     ) or "(beginning of conversation)"
 
-    stage_descriptions = {
-        "clarify_goal":    "Goal: understand what the user wants this workflow to accomplish.",
-        "clarify_inputs":  "Inputs: where the data/content comes from — files, URLs, user input, APIs, databases, etc.",
-        "clarify_process": "Process: what steps/transformations/actions the workflow should perform. "
-                            "Tailor questions to the user's domain (writing, analysis, automation, etc.).",
-        "clarify_outputs": "Outputs: what format and where to save — file, chat display, email, etc.",
-    }
+    # How many turns have we had?  Used to decide depth vs pace.
+    turn_count = len([m for m in session.conversation if m['role'] == 'assistant'])
 
-    current_stage_desc = stage_descriptions.get(session.stage, stage_descriptions["clarify_goal"])
+    # ── Complexity-aware pacing ──
+    # Determine max turns and required areas based on assessed complexity
+    complexity = getattr(session, 'complexity', 'MODERATE')
+    if complexity == 'COMPLEX':
+        max_turns = MAX_TURNS_COMPLEX
+        required_areas = COMPLEX_REQUIRED_AREAS
+    elif complexity == 'SIMPLE':
+        max_turns = MAX_TURNS_SIMPLE
+        required_areas = SIMPLE_REQUIRED_AREAS
+    else:
+        max_turns = MAX_TURNS_MODERATE
+        required_areas = DEFAULT_REQUIRED_AREAS
 
-    # Determine which stages are already done
-    done_stages = []
+    urgency_level = turn_count / max(max_turns, 1)  # 0.0 → 1.0
+
+    pacing_hint = ""
+    if turn_count >= max_turns:
+        pacing_hint = (
+            f"You have had {turn_count} turns — EXCEEDED the {max_turns}-turn budget for {complexity} workflows. "
+            "You MUST set stage to 'generating' NOW. "
+            "If any area is still unclear, fill in reasonable defaults."
+        )
+    elif urgency_level >= 0.75:
+        pacing_hint = (
+            f"Turn {turn_count}/{max_turns}. Most of the question budget is used. "
+            "Unless there is a CRITICAL ambiguity, move to 'generating'."
+        )
+    elif urgency_level >= 0.5:
+        pacing_hint = (
+            f"Turn {turn_count}/{max_turns}. "
+            "Ask ONLY if there's an important gap. Prefer to move to 'generating'."
+        )
+
+    # Collect whatever we know so the LLM can see the full picture
+    gathered_context = []
     if session.goal:
-        done_stages.append("✅ Goal clarified")
+        gathered_context.append(f"Goal: {session.goal[:500]}")
     if session.inputs_info and session.inputs_info.get("summary"):
-        done_stages.append("✅ Inputs clarified")
+        gathered_context.append(f"Inputs: {session.inputs_info['summary'][:500]}")
     if session.process_info and session.process_info.get("summary"):
-        done_stages.append("✅ Processing clarified")
+        gathered_context.append(f"Process: {session.process_info['summary'][:500]}")
     if session.output_info and session.output_info.get("summary"):
-        done_stages.append("✅ Outputs clarified")
+        gathered_context.append(f"Outputs: {session.output_info['summary'][:500]}")
 
-    return f"""You are a helpful workflow design assistant. Your job is to guide a user through
-creating a reusable automation workflow by asking targeted questions TAILORED to their specific domain.
+    # Calculate how many areas are filled
+    filled_areas = sum(1 for item in gathered_context)
+    sufficiency_signal = ""
+    if filled_areas >= required_areas:
+        sufficiency_signal = (
+            f"\n## ⚠️ SUFFICIENCY: {filled_areas}/{required_areas} required areas are filled "
+            f"(complexity={complexity}). "
+            "You DO NOT need to ask more questions. Move directly to 'generating' "
+            "unless there's a genuine showstopper ambiguity. "
+            "For any minor gaps, fill in sensible defaults — the user can modify the preview later."
+        )
 
-## USER'S GOAL
+    return f"""You are a **workflow design partner**. Your PRIMARY goal is to help the user
+create a workflow as efficiently as possible, NOT to have a long conversation.
+
+## WORKFLOW COMPLEXITY: {complexity} (question budget: {max_turns} turns)
+
+## USER'S STATED GOAL
 {session.goal or '(stated in conversation)'}
 
 ## AVAILABLE TOOLS
@@ -134,40 +194,110 @@ creating a reusable automation workflow by asking targeted questions TAILORED to
 ## CONVERSATION SO FAR
 {conv_text}
 
-## CURRENT STAGE: {session.stage}
-{current_stage_desc}
+## WHAT WE KNOW SO FAR
+{chr(10).join(gathered_context) if gathered_context else '(nothing yet — start by understanding the goal)'}
+{sufficiency_signal}
 
-## PROGRESS
-{chr(10).join(done_stages) if done_stages else 'No stages completed yet.'}
+## GUIDING PRINCIPLES (prioritise based on complexity)
+For COMPLEX workflows, spend more time on:
+- Environment setup & external dependencies
+- Multi-stage processing logic
+- Error handling and edge cases
+For SIMPLE workflows, be brief — 1-2 questions max.
 
-## COLLECTED INFO
-Goal: {session.goal or '(not yet clarified)'}
-Inputs: {_json.dumps(session.inputs_info, ensure_ascii=False) if session.inputs_info else '(not yet)'}
-Processing: {_json.dumps(session.process_info, ensure_ascii=False) if session.process_info else '(not yet)'}
-Outputs: {_json.dumps(session.output_info, ensure_ascii=False) if session.output_info else '(not yet)'}
+## PACING
+{pacing_hint if pacing_hint else f'This is turn 0 or 1 ({complexity} workflow, budget {max_turns} turns). Ask according to complexity.'}
 
-## INSTRUCTIONS
-1. Ask ONLY 1 question at a time, SPECIFIC to the user's domain.
-   For a WRITING workflow, ask about genre/characters/chapters.
-   For a DATA workflow, ask about files/columns/analysis.
-   For an AUTOMATION workflow, ask about triggers/schedules/actions.
-   NEVER ask generic questions that don't fit the user's goal.
-2. Advance to the NEXT stage after collecting just ONE or TWO pieces of information per stage.
-   Complete ALL 4 stages within 4-6 messages total.
-3. Users don't need perfect completeness — fill in reasonable defaults for missing details.
-4. When you have ANY info about the current stage, immediately summarize and move to the NEXT stage.
-5. If the user's reply contains information about FUTURE stages, capture it all and advance MULTIPLE stages.
-6. If ALL four stages have sufficient info, set stage to "generating" and write a warm summary.
-7. Respond in the USER'S LANGUAGE. Keep responses brief — maximum 3 sentences.
+## CRITICAL RULES
+1. Ask at most ONE question per turn (or 2-3 for COMPLEX workflows in early turns).
+   If you have enough to design the workflow, ask ZERO questions and set stage to "generating".
+2. For COMPLEX workflows, you ARE allowed to ask 2-3 questions in one message when it makes sense.
+3. If {required_areas}+ areas (goal/inputs/process/outputs) are filled, prefer to generate immediately.
+4. For vague answers like "whatever works", do NOT probe again — just pick a reasonable default.
+5. **Always provide 2-4 concrete options** when asking a question.
+6. Respond in the USER'S LANGUAGE. Be warm and efficient.
 
 Return JSON:
 {{"stage": "clarify_goal"|"clarify_inputs"|"clarify_process"|"clarify_outputs"|"generating",
- "message": "your natural-language message to the user",
+ "message": "your question (or confirmation before generating)",
  "extracted_info": {{
-   "goal_updates": "updated goal description or null",
-   "inputs_summary": "summary of input information or null",
-   "process_summary": "summary of processing requirements or null",
-   "outputs_summary": "summary of output requirements or null"
+   "goal_updates": "updated goal or null",
+   "inputs_summary": "summary of input info or null",
+   "process_summary": "summary of processing info or null",
+   "outputs_summary": "summary of output info or null"
+ }}}}"""
+
+
+def _build_first_turn_prompt(user_goal: str, tools_summary: str) -> str:
+    """Build the prompt for the LLM to assess complexity AND ask the first question.
+
+    Two-step process:
+    1. **Assess complexity**: how many stages / external dependencies does this need?
+    2. **Ask the right number of questions**: SIMPLE → 0-1, MODERATE → 2, COMPLEX → 3-5.
+
+    For COMPLEX workflows, the assistant may present 2-3 questions in ONE message
+    as a checklist, so the user can answer all at once and the builder can proceed.
+    """
+
+    return f"""You are a **workflow design partner** helping a user create an automation workflow.
+
+## USER'S STATED GOAL
+{user_goal[:500]}
+
+## AVAILABLE TOOLS
+{tools_summary}
+
+## STEP 1 — ASSESS COMPLEXITY
+First, evaluate how complex this workflow is:
+
+**SIMPLE** (1-2 tools, linear flow):
+  Examples: "read a file and summarize it", "translate this text", "search the web for X"
+  → Ask 0-1 question, can often go straight to "generating"
+
+**MODERATE** (3-4 tools, some branching):
+  Examples: "scrape a website, clean data, output a report", "monitor a folder and alert on changes"
+  → Ask 2 focused questions
+
+**COMPLEX** (5+ tools, multi-stage pipeline, external dependencies):
+  Examples: "download video, run ASR, proofread transcript, analyze content, generate report",
+            "ETL pipeline with validation, transformation, and multiple output formats"
+  → Ask 3-5 questions to cover: environment setup, processing rules, edge cases, output format
+
+## STEP 2 — ASK QUESTIONS
+Based on complexity, ask the right questions:
+
+**For SIMPLE**: ask 0-1 question, or go straight to "generating"
+
+**For MODERATE**: ask 1-2 questions. Pick the most impactful ones:
+  - Input source/data format
+  - Output format/preferences
+  - Key processing logic
+
+**For COMPLEX**: present 2-3 questions in ONE well-organized message as a checklist:
+  - Environment/runtime needs (what tools/libraries must be installed? e.g., yt-dlp, whisper)
+  - Processing logic (what exactly should happen at each stage?)
+  - Output format and structure
+  - Edge cases and error handling
+  Format as a clear, scannable checklist so the user can answer concisely.
+
+## CRITICAL RULES
+1. Always provide 2-4 CONCRETE OPTIONS (A/B/C style) wherever possible.
+2. If the goal mentions tools not in the available list (e.g., yt-dlp, whisper, ffmpeg),
+   note them as "external dependencies" and ask the user to confirm they have them installed.
+3. Respond in the USER'S LANGUAGE.
+4. Be warm and efficient.
+5. For COMPLEX workflows, ask multiple questions in ONE message — don't drip-feed one at a time.
+
+Return JSON:
+{{"complexity": "SIMPLE"|"MODERATE"|"COMPLEX",
+ "max_questions_needed": 0-5,
+ "stage": "clarify_goal"|"clarify_inputs"|"clarify_process"|"clarify_outputs"|"generating",
+ "message": "your question(s) or generation announcement",
+ "extracted_info": {{
+   "goal_updates": "refined goal or null",
+   "inputs_summary": "any input info implied by goal, or null",
+   "process_summary": "any process info implied by goal, or null",
+   "outputs_summary": "any output info implied by goal, or null"
  }}}}"""
 
 
@@ -183,13 +313,36 @@ def _prompt_generate_workflow(session: BuilderSession, tools_summary: str) -> st
         f"Processing: {_json.dumps(session.process_info, ensure_ascii=False)}\n"
         f"Outputs: {_json.dumps(session.output_info, ensure_ascii=False)}\n\n"
         f"## AVAILABLE TOOLS\n{tools_summary}\n\n"
+        "## TOOL CAPABILITY GUIDE (IMPORTANT)\n"
+        "Choose the right tool for each task:\n"
+        "- **code.execute**: Python sandbox. SAFE but RESTRICTED — NO network, NO file system access.\n"
+        "  Use only for pure computation (math, data processing, text analysis).\n"
+        "  ❌ Cannot: download files, call APIs, read local files, use external libraries (whisper, etc.)\n"
+        "  ✅ Can: process in-memory data, compute statistics, format text\n\n"
+        "- **command.run**: Shell command execution. Needs user approval. Can access network & file system.\n"
+        "  Use for: running CLI tools (yt-dlp, ffmpeg, whisper, pip install), file operations.\n"
+        "  ⚠️ Requires HIGH risk approval from user.\n"
+        "  ✅ Can: download, call APIs, run any installed CLI tool, access filesystem\n\n"
+        "- **file.read / file.write**: Read/write local files.\n"
+        "- **http.request / http.download**: Make HTTP requests, download files.\n"
+        "- **web.search**: Search the web for information.\n\n"
+        "## SCRIPT GENERATION RULES\n"
+        "For steps that need custom logic beyond simple tool calls, generate an INLINE SCRIPT:\n"
+        "1. Use the `script` field to embed the Python or shell script directly in the step.\n"
+        "2. Set `script_type` to \"python\" or \"shell\".\n"
+        "3. For Python scripts that need external packages, list them in `requires_packages`.\n"
+        "4. For shell scripts that call CLI tools, list the tools in `requires_packages` as well.\n"
+        "5. Add an early PREPARE step that installs dependencies via `command.run` if needed.\n\n"
         "## RULES\n"
         "1. Each step must use an action_type: PREPARE, TOOL, MODEL_ANSWER, OBSERVE, FINALIZE\n"
         "2. TOOL steps must specify which tool_name from the available tools list\n"
         "3. Keep steps focused and atomic (one clear action per step)\n"
-        "4. Use 4-8 steps for a typical workflow\n"
+        "4. Use 4-8 steps for SIMPLE workflows, 6-12 steps for COMPLEX workflows\n"
         "5. Risk level: LOW (read-only), MEDIUM (writes files), HIGH (deletes/runs commands)\n"
-        "6. Generate a descriptive name and a clear description\n\n"
+        "6. For tasks requiring external tools (yt-dlp, whisper, ffmpeg, etc.), use `command.run`\n"
+        "7. Include an environment check/setup step at the beginning for COMPLEX workflows\n"
+        "8. Generate a descriptive name and a clear description\n"
+        "9. Use the `environment_setup` field to declare all external dependencies\n\n"
         "Return JSON matching this schema:\n"
         + _workflow_json_schema()
     )
@@ -202,7 +355,13 @@ def _workflow_json_schema() -> str:
   "risk_summary": "LOW"|"MEDIUM"|"HIGH",
   "tags": ["reporting", "automation", ...],
   "required_permissions": ["tool:file.read", ...],
-  "required_tools": ["file.read", ...],
+  "required_tools": ["file.read", "command.run", "code.execute", ...],
+  "environment_setup": {
+    "requires_network": true|false,
+    "requires_filesystem": true|false,
+    "external_dependencies": ["yt-dlp", "ffmpeg", "openai-whisper", ...],
+    "setup_notes": "Instructions for installing dependencies before running"
+  },
   "input_schema": {"fields": [{"name": "...", "type": "...", "description": "...", "required": true|false}]},
   "output_schema": {"format": "markdown"|"json"|"text", "description": "..."},
   "steps": [
@@ -211,8 +370,11 @@ def _workflow_json_schema() -> str:
       "title": "Step title",
       "objective": "What this step aims to achieve (for the Agent)",
       "action_type": "PREPARE"|"TOOL"|"MODEL_ANSWER"|"OBSERVE"|"FINALIZE",
-      "tool_name": "file.read"|"file.list"|"http.request"|... (only for TOOL type),
-      "tool_params_template": {"path": "...", "query": "..."},
+      "tool_name": "file.read"|"command.run"|"code.execute"|... (only for TOOL type),
+      "tool_params_template": {"path": "...", "query": "...", "command": "...", "code": "..."},
+      "script": "Inline Python or shell script to execute (optional — use for complex logic)",
+      "script_type": "python"|"shell"|null,
+      "requires_packages": ["package names needed by this step's script"],
       "depends_on": [],
       "expected_output": "What should result from this step",
       "error_handling": "skip"|"retry"|"abort",
@@ -246,31 +408,88 @@ class WorkflowBuilder:
             lines.append(f"- {d['tool_name']} ({d.get('risk_level','LOW')}): {d.get('description','')[:120]}")
         return "\n".join(lines) if lines else "(no tools registered)"
 
-    def start(self, user_input: str, session_id: str | None = None) -> dict[str, Any]:
+    async def start(self, user_input: str, session_id: str | None = None) -> dict[str, Any]:
         """Begin a new workflow building session.
 
-        Returns immediately with a hardcoded opening message (no LLM call)
-        so the frontend gets a fast response.  The first real LLM-driven
-        turn happens inside continue_dialog().
+        Calls the LLM to generate a dynamic first question tailored to the
+        user's specific goal.  Falls back to a hardcoded opening message if
+        the LLM is unavailable or times out.
         """
+        import asyncio as _asyncio
+
         sid = session_id or f"wfbuild_{uuid4().hex[:12]}"
-        # IMPORTANT: session.stage MUST match the returned stage below.
-        # We skip clarify_goal because the user already stated their goal.
-        session = BuilderSession(session_id=sid, stage="clarify_inputs")
+        # Start in clarify_goal — the LLM will decide the actual stage
+        session = BuilderSession(session_id=sid, stage="clarify_goal")
         session.conversation.append({"role": "user", "content": user_input})
         session.goal = user_input[:300]
         self._sessions[sid] = session
 
-        # Fast, hardcoded opening message — feels instant
+        # ── Try LLM-driven first turn ──
+        if self.model_gateway.is_live():
+            try:
+                tools_summary = self.get_tools_summary()
+                prompt = _build_first_turn_prompt(user_input, tools_summary)
+
+                result = await _asyncio.wait_for(
+                    self._call_llm_conversation_turn(prompt),
+                    timeout=START_TIMEOUT,
+                )
+
+                agent_msg = result.get("message", "请描述一下你想要的输出结果...")
+                extracted = result.get("extracted_info", {})
+                new_stage = result.get("stage", "clarify_inputs")
+
+                # ── Capture complexity assessment ──
+                complexity = result.get("complexity", "MODERATE")
+                max_q = result.get("max_questions_needed", 2)
+                if complexity in ("SIMPLE", "MODERATE", "COMPLEX"):
+                    session.complexity = complexity
+                session.max_questions_needed = max_q
+
+                # Merge extracted info into session
+                if extracted.get("goal_updates"):
+                    session.goal = extracted["goal_updates"]
+                if extracted.get("inputs_summary"):
+                    session.inputs_info["summary"] = extracted["inputs_summary"]
+                if extracted.get("process_summary"):
+                    session.process_info["summary"] = extracted["process_summary"]
+                if extracted.get("outputs_summary"):
+                    session.output_info["summary"] = extracted["outputs_summary"]
+
+                session.stage = new_stage
+                session.conversation.append({"role": "assistant", "content": agent_msg})
+
+                return {
+                    "session_id": sid,
+                    "stage": new_stage,
+                    "agent_message": agent_msg,
+                    "collected_info": self._collect_info(session),
+                    "complexity": session.complexity,
+                }
+
+            except _asyncio.TimeoutError:
+                logger.warning("First-turn LLM call timed out (%.0fs), using fallback", START_TIMEOUT)
+            except Exception as exc:
+                logger.warning("First-turn LLM call failed: %s, using fallback", exc)
+
+        # ── Fallback: hardcoded opening (original behaviour) ──
+        session.stage = "clarify_inputs"
+        fallback_msg = (
+            f"我理解你想创建一个工作流：**{user_input[:120]}{'...' if len(user_input)>120 else ''}**\n\n"
+            "为了设计得更准确，我先确认一下：**这个工作流完成后，你期望的结果是什么形式的？**\n\n"
+            "比如：\n"
+            "• 🟢 在聊天窗口直接看到分析结论\n"
+            "• 📄 生成一个文件（Markdown / Excel / PDF）保存到本地\n"
+            "• 📊 输出一个结构化的数据表格\n"
+            "• 📧 把结果通过邮件或通知发送出去\n"
+            "• 🔄 触发下一个工作流继续处理\n\n"
+            "你可以直接选一个，或者说你自己的需求 😊"
+        )
+        session.conversation.append({"role": "assistant", "content": fallback_msg})
         return {
             "session_id": sid,
             "stage": "clarify_inputs",
-            "agent_message": (
-                f"好的，我理解了你的目标：**{user_input[:100]}{'...' if len(user_input)>100 else ''}**\n\n"
-                "接下来我需要了解一些细节来设计这个工作流。请告诉我：\n"
-                "1. **输入来源**：这个工作流需要什么输入？（文件、URL、用户提供的内容等）\n"
-                "2. **输入形式**：输入内容是什么格式或什么类型的信息？"
-            ),
+            "agent_message": fallback_msg,
             "collected_info": {"goal": session.goal},
         }
 
@@ -284,6 +503,8 @@ class WorkflowBuilder:
         2. Decide which stage we're at
         3. Generate the next natural-language question
 
+        **Key behavior**: If enough information has been collected (3+ areas filled),
+        skips further questioning and generates the workflow directly.
         Falls back to hardcoded questions when LLM is unavailable.
         """
         session = self._sessions.get(session_id)
@@ -308,6 +529,40 @@ class WorkflowBuilder:
             else:
                 # User wants to modify → go to modify_workflow
                 return await self.modify_workflow(session_id, user_reply)
+
+        # ── Pre-LLM sufficiency check (complexity-aware) ──
+        # If we already have enough info, skip further questioning and generate directly.
+        filled_areas = (
+            (1 if session.goal else 0) +
+            (1 if session.inputs_info.get("summary") else 0) +
+            (1 if session.process_info.get("summary") else 0) +
+            (1 if session.output_info.get("summary") else 0)
+        )
+        turn_count = len([m for m in session.conversation if m["role"] == "assistant"])
+
+        # Determine thresholds from assessed complexity
+        complexity = getattr(session, 'complexity', 'MODERATE')
+        if complexity == 'COMPLEX':
+            required = COMPLEX_REQUIRED_AREAS
+            max_t = MAX_TURNS_COMPLEX
+        elif complexity == 'SIMPLE':
+            required = SIMPLE_REQUIRED_AREAS
+            max_t = MAX_TURNS_SIMPLE
+        else:
+            required = DEFAULT_REQUIRED_AREAS
+            max_t = MAX_TURNS_MODERATE
+
+        if turn_count >= max_t or filled_areas >= required:
+            logger.info(
+                "Sufficiency reached (areas=%d/%d, turns=%d/%d, complexity=%s) — generating workflow directly",
+                filled_areas, required, turn_count, max_t, complexity
+            )
+            session.stage = "generating"
+            gen_result = await self.generate_workflow(session_id)
+            return {
+                "session_id": session_id,
+                **gen_result,
+            }
 
         # ── LLM-driven conversation ──
         if self.model_gateway.is_live():
@@ -375,41 +630,57 @@ class WorkflowBuilder:
     def _fallback_continue_dialog(
         self, session: BuilderSession, user_reply: str, session_id: str
     ) -> dict[str, Any]:
-        """Generic conversation fallback when LLM is unavailable.
+        """Minimal fallback when LLM is unavailable.
 
-        Uses neutral, domain-agnostic questions that work for any workflow type
-        (writing, analysis, automation, file processing, etc.).
+        Advances through stages quickly — only 2-3 turns total.
+        Each turn gives concrete options, not open-ended philosophy.
         """
+        turn_count = len([m for m in session.conversation if m["role"] == "assistant"])
+
         if session.stage == "clarify_goal":
+            session.inputs_info["raw_reply"] = user_reply
+            session.inputs_info["summary"] = user_reply[:200]
             session.stage = "clarify_inputs"
             agent_msg = (
-                "明白了。请告诉我工作流的**输入信息**：\n"
-                "1. 数据/内容从哪来？（文件路径、API、用户输入等）\n"
-                "2. 输入是什么格式或形式？"
+                f"明白了。接下来确认一下**输入**：\n\n"
+                f"你的数据从哪里来？\n"
+                f"🅰️ 本地文件（Excel / CSV / JSON / TXT）\n"
+                f"🅱️ 网页链接 / API 接口\n"
+                f"🅲️ 数据库查询\n"
+                f"🅳️ 我直接在对话里提供内容\n\n"
+                f"你选哪个？（可以多选，也可以说自己的情况）"
             )
         elif session.stage == "clarify_inputs":
             session.inputs_info["raw_reply"] = user_reply
-            session.stage = "clarify_process"
+            session.inputs_info["summary"] = user_reply[:200]
+            session.stage = "clarify_outputs"
             agent_msg = (
-                "好的。接下来请描述你需要的**处理步骤**：\n"
-                "1. 这个工作流需要完成哪些具体操作？\n"
-                "2. 有没有特定的规则、条件或约束？"
+                "好的。最后确认一下**输出格式**：\n\n"
+                "你希望结果以什么形式呈现？\n"
+                "🅰️ 直接在对话窗口展示分析结论\n"
+                "🅱️ 生成一个文件（Markdown / Excel / PDF）\n"
+                "🅲️ 输出结构化的 JSON 数据\n"
+                "🅳️ 把结果发到其他地方（邮件、通知等）\n\n"
+                "选一个就够，我马上为你生成工作流 😊"
             )
         elif session.stage == "clarify_process":
             session.process_info["raw_reply"] = user_reply
+            session.process_info["summary"] = user_reply[:200]
             session.stage = "clarify_outputs"
             agent_msg = (
-                "了解。最后关于**输出结果**：\n"
-                "1. 最终产物是什么？（文件、消息、操作结果等）\n"
-                "2. 输出到哪里？以什么形式保存或展示？"
+                "好的。最后确认**输出格式**：\n"
+                "🅰️ 聊天窗口直接展示  🅱️ 生成文件  🅲️ JSON 数据  🅳️ 其他"
             )
         elif session.stage == "clarify_outputs":
             session.output_info["raw_reply"] = user_reply
+            session.output_info["summary"] = user_reply[:200]
             session.stage = "generating"
-            agent_msg = "好的，信息已收集完毕，正在生成工作流预览..."
+            agent_msg = (
+                "好的，信息足够了。让我为你生成工作流预览..."
+            )
         else:
             session.stage = "generating"
-            agent_msg = "正在生成工作流..."
+            agent_msg = "让我根据我们讨论的内容来生成工作流..."
 
         session.conversation.append({"role": "assistant", "content": agent_msg})
 
@@ -470,6 +741,17 @@ class WorkflowBuilder:
                     "enum": ["clarify_goal", "clarify_inputs", "clarify_process", "clarify_outputs", "generating"],
                 },
                 "message": {"type": "string"},
+                "complexity": {
+                    "type": "string",
+                    "enum": ["SIMPLE", "MODERATE", "COMPLEX"],
+                    "description": "Assessed workflow complexity"
+                },
+                "max_questions_needed": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 8,
+                    "description": "Estimated number of Q&A rounds needed"
+                },
                 "extracted_info": {
                     "type": "object",
                     "properties": {
@@ -526,6 +808,15 @@ class WorkflowBuilder:
                     "tags": {"type": "array", "items": {"type": "string"}},
                     "required_permissions": {"type": "array", "items": {"type": "string"}},
                     "required_tools": {"type": "array", "items": {"type": "string"}},
+                    "environment_setup": {
+                        "type": "object",
+                        "properties": {
+                            "requires_network": {"type": "boolean"},
+                            "requires_filesystem": {"type": "boolean"},
+                            "external_dependencies": {"type": "array", "items": {"type": "string"}},
+                            "setup_notes": {"type": "string"},
+                        },
+                    },
                     "input_schema": {"type": "object"},
                     "output_schema": {"type": "object"},
                     "steps": {
@@ -539,6 +830,9 @@ class WorkflowBuilder:
                                 "action_type": {"type": "string", "enum": ["PREPARE", "TOOL", "MODEL_ANSWER", "OBSERVE", "FINALIZE"]},
                                 "tool_name": {"type": "string"},
                                 "tool_params_template": {"type": "object"},
+                                "script": {"type": "string", "description": "Inline Python or shell script"},
+                                "script_type": {"type": "string", "enum": ["python", "shell"]},
+                                "requires_packages": {"type": "array", "items": {"type": "string"}},
                                 "depends_on": {"type": "array", "items": {"type": "integer"}},
                                 "expected_output": {"type": "string"},
                                 "error_handling": {"type": "string", "enum": ["skip", "retry", "abort"]},
@@ -576,6 +870,7 @@ class WorkflowBuilder:
                 required_permissions=result.get("required_permissions", []),
                 input_schema=result.get("input_schema", {}),
                 output_schema=result.get("output_schema", {}),
+                environment_setup=result.get("environment_setup", {}),
                 steps=result.get("steps", []),
             )
 
@@ -711,50 +1006,86 @@ class WorkflowBuilder:
         }
 
     def _fallback_workflow(self, session: BuilderSession) -> WorkflowTemplate:
-        """Generate a simple workflow without LLM (dev-mode fallback)."""
-        steps = [
-            {
-                "index": 1, "title": "确认目标和输入",
-                "objective": f"确认工作流目标: {session.goal[:100]}",
-                "action_type": "PREPARE",
-                "depends_on": [],
-                "expected_output": "已确认的执行上下文",
-                "error_handling": "abort",
-                "risk_level": "LOW",
-            },
-            {
-                "index": 2, "title": "处理数据/执行分析",
-                "objective": "根据用户需求执行核心处理逻辑",
-                "action_type": "TOOL",
-                "tool_name": "file.read",
-                "depends_on": [1],
-                "expected_output": "处理结果",
-                "error_handling": "retry",
-                "risk_level": "LOW",
-            },
-            {
-                "index": 3, "title": "生成输出",
-                "objective": "生成最终结果并展示给用户",
-                "action_type": "FINALIZE",
-                "depends_on": [2],
-                "expected_output": "最终输出",
-                "error_handling": "abort",
-                "risk_level": "LOW",
-            },
-        ]
+        """Generate a template workflow without LLM (dev-mode fallback).
+
+        Uses complexity-appropriate number of steps.  Contains placeholder
+        steps that the user can refine manually.
+        """
+        complexity = getattr(session, 'complexity', 'MODERATE')
+
+        if complexity == 'SIMPLE':
+            steps = [
+                {"index": 1, "title": "确认输入", "objective": f"确认输入: {session.goal[:80]}",
+                 "action_type": "PREPARE", "depends_on": [], "expected_output": "已确认的输入",
+                 "error_handling": "abort", "risk_level": "LOW"},
+                {"index": 2, "title": "执行核心任务", "objective": "根据用户需求执行核心处理",
+                 "action_type": "TOOL", "tool_name": "file.read", "depends_on": [1],
+                 "expected_output": "处理结果", "error_handling": "retry", "risk_level": "LOW"},
+                {"index": 3, "title": "输出结果", "objective": "展示最终结果",
+                 "action_type": "FINALIZE", "depends_on": [2], "expected_output": "最终输出",
+                 "error_handling": "abort", "risk_level": "LOW"},
+            ]
+            tools = ["file.read"]
+            env_setup = {}
+        elif complexity == 'COMPLEX':
+            steps = [
+                {"index": 1, "title": "环境准备", "objective": "检查并安装所需的依赖工具和库",
+                 "action_type": "PREPARE", "depends_on": [],
+                 "expected_output": "环境就绪确认", "error_handling": "abort", "risk_level": "MEDIUM"},
+                {"index": 2, "title": "获取输入数据", "objective": f"获取输入: {session.goal[:80]}",
+                 "action_type": "TOOL", "tool_name": "http.download", "depends_on": [1],
+                 "expected_output": "输入数据", "error_handling": "retry", "risk_level": "MEDIUM"},
+                {"index": 3, "title": "第一阶段处理", "objective": "执行管道第一阶段",
+                 "action_type": "TOOL", "tool_name": "command.run", "depends_on": [2],
+                 "expected_output": "阶段一结果", "error_handling": "retry", "risk_level": "HIGH"},
+                {"index": 4, "title": "第二阶段处理", "objective": "执行管道第二阶段",
+                 "action_type": "TOOL", "tool_name": "command.run", "depends_on": [3],
+                 "expected_output": "阶段二结果", "error_handling": "retry", "risk_level": "HIGH"},
+                {"index": 5, "title": "分析/校对", "objective": "对处理结果进行分析和校对",
+                 "action_type": "MODEL_ANSWER", "depends_on": [4],
+                 "expected_output": "分析报告", "error_handling": "retry", "risk_level": "LOW"},
+                {"index": 6, "title": "生成最终输出", "objective": "将分析结果格式化为最终输出",
+                 "action_type": "FINALIZE", "depends_on": [5], "expected_output": "最终输出",
+                 "error_handling": "abort", "risk_level": "LOW"},
+            ]
+            tools = ["http.download", "command.run", "file.read", "file.write"]
+            env_setup = {
+                "requires_network": True,
+                "requires_filesystem": True,
+                "external_dependencies": [],
+                "setup_notes": "请确认所需的命令行工具和 Python 库已安装。"
+            }
+        else:  # MODERATE
+            steps = [
+                {"index": 1, "title": "确认目标和输入", "objective": f"确认工作流目标: {session.goal[:100]}",
+                 "action_type": "PREPARE", "depends_on": [], "expected_output": "已确认的执行上下文",
+                 "error_handling": "abort", "risk_level": "LOW"},
+                {"index": 2, "title": "处理数据/执行分析", "objective": "根据用户需求执行核心处理逻辑",
+                 "action_type": "TOOL", "tool_name": "file.read", "depends_on": [1],
+                 "expected_output": "处理结果", "error_handling": "retry", "risk_level": "LOW"},
+                {"index": 3, "title": "生成输出", "objective": "生成最终结果并展示给用户",
+                 "action_type": "FINALIZE", "depends_on": [2], "expected_output": "最终输出",
+                 "error_handling": "abort", "risk_level": "LOW"},
+            ]
+            tools = ["file.read"]
+            env_setup = {}
+
         return WorkflowTemplate(
             name=session.goal[:50] or "自定义工作流",
             description=session.goal[:200],
-            risk_summary="LOW",
+            risk_summary="MEDIUM" if complexity == "COMPLEX" else "LOW",
             steps=steps,
-            required_tools=["file.read"],
-            required_permissions=["tool:file.read"],
+            required_tools=tools,
+            required_permissions=[f"tool:{t}" for t in tools],
+            environment_setup=env_setup,
         )
 
     def _format_preview_message(self, wf: WorkflowTemplate) -> str:
         """Format workflow preview as a readable message."""
         step_lines = "\n".join(
             f"  {s.get('index', i+1)}. **{s.get('title', 'Step')}** — {s.get('action_type', '')}"
+            + (f" 📜 含脚本" if s.get('script') else "")
+            + (f" ({s.get('script_type', '')})" if s.get('script_type') else "")
             for i, s in enumerate(wf.steps[:8])
         )
         if len(wf.steps) > 8:
@@ -763,12 +1094,25 @@ class WorkflowBuilder:
         tools_str = ", ".join(wf.required_tools[:5]) if wf.required_tools else "无"
         risk_icon = {"LOW": "🟢", "MEDIUM": "🟡", "HIGH": "🔴"}.get(wf.risk_summary, "⚪")
 
+        # Environment setup section
+        env_section = ""
+        env = wf.environment_setup
+        if env:
+            deps = env.get("external_dependencies", [])
+            if deps:
+                env_section += f"\n**外部依赖**: {', '.join(deps)}"
+            if env.get("setup_notes"):
+                env_section += f"\n**环境说明**: {env['setup_notes']}"
+            if env_section:
+                env_section = "\n### 🔧 环境要求" + env_section + "\n"
+
         return (
             f"## 📋 工作流预览\n\n"
             f"**名称**: {wf.name}\n"
             f"**描述**: {wf.description or '(无)'}\n"
             f"**风险**: {risk_icon} {wf.risk_summary}\n"
-            f"**所需工具**: {tools_str}\n\n"
+            f"**所需工具**: {tools_str}\n"
+            f"{env_section}"
             f"### 步骤 ({len(wf.steps)} 步)\n{step_lines}\n\n"
             f"---\n"
             f"回复 **'确认'** 保存此工作流，或说出你想修改的地方。"

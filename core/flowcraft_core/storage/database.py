@@ -221,6 +221,79 @@ CREATE TABLE IF NOT EXISTS workflow_runs (
   FOREIGN KEY (workflow_id) REFERENCES workflow_templates(id)
 );
 
+-- vent_phrases: curated vent phrase library
+CREATE TABLE IF NOT EXISTS vent_phrases (
+    id TEXT PRIMARY KEY,
+    text TEXT NOT NULL,
+    lang TEXT NOT NULL DEFAULT 'zh',
+    category TEXT NOT NULL DEFAULT 'default',
+    pain_direction TEXT NOT NULL DEFAULT 'general',
+    guides_user_to TEXT NOT NULL DEFAULT '',
+    vote_count INTEGER DEFAULT 0,
+    is_custom BOOLEAN DEFAULT FALSE,
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TEXT NOT NULL
+);
+
+-- vent_sessions: vent session records
+CREATE TABLE IF NOT EXISTS vent_sessions (
+    id TEXT PRIMARY KEY,
+    task_id TEXT,
+    session_id TEXT NOT NULL,
+    severity INTEGER NOT NULL,
+    pain_points_json TEXT,
+    template_filled_json TEXT,
+    selected_phrase_id TEXT,
+    insight_generated TEXT,
+    mapped_failure_type TEXT,
+    status TEXT NOT NULL DEFAULT 'IDLE',
+    created_at TEXT NOT NULL,
+    closed_at TEXT,
+    FOREIGN KEY (task_id) REFERENCES tasks(id)
+);
+
+-- pain_point_analytics: cumulative pain point analysis
+CREATE TABLE IF NOT EXISTS pain_point_analytics (
+    id TEXT PRIMARY KEY,
+    pain_point TEXT NOT NULL,
+    failure_type TEXT,
+    occurrence_count INTEGER DEFAULT 1,
+    suppressed_after_occurrence TEXT,
+    first_seen_at TEXT,
+    last_seen_at TEXT,
+    UNIQUE(pain_point)
+);
+
+-- feedback_memories: persistent lessons from feedback
+CREATE TABLE IF NOT EXISTS feedback_memories (
+    id TEXT PRIMARY KEY,
+    memory_type TEXT NOT NULL DEFAULT 'lesson_learned',
+    summary TEXT NOT NULL,
+    task_type TEXT,
+    failure_type TEXT,
+    tools_involved_json TEXT,
+    pain_direction TEXT,
+    severity INTEGER DEFAULT 0,
+    occurrence_count INTEGER DEFAULT 1,
+    source_vent_session_id TEXT,
+    vector_store_collection TEXT,
+    retrieval_weight REAL DEFAULT 1.0,
+    created_at TEXT NOT NULL,
+    last_retrieved_at TEXT,
+    FOREIGN KEY (source_vent_session_id) REFERENCES vent_sessions(id)
+);
+
+-- memory_retrieval_log: tracks which lessons were applied
+CREATE TABLE IF NOT EXISTS memory_retrieval_log (
+    id TEXT PRIMARY KEY,
+    memory_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    retrieved_at TEXT NOT NULL,
+    was_effective BOOLEAN,
+    FOREIGN KEY (memory_id) REFERENCES feedback_memories(id),
+    FOREIGN KEY (task_id) REFERENCES tasks(id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_trace_events_task_id ON trace_events(task_id);
 CREATE INDEX IF NOT EXISTS idx_trace_events_session_id ON trace_events(session_id);
 CREATE INDEX IF NOT EXISTS idx_trace_events_event_type ON trace_events(event_type);
@@ -229,6 +302,10 @@ CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_model_calls_task_id ON model_calls(task_id);
 CREATE INDEX IF NOT EXISTS idx_memories_scope_id ON memories(scope_id);
 CREATE INDEX IF NOT EXISTS idx_memories_deleted_at ON memories(deleted_at);
+CREATE INDEX IF NOT EXISTS idx_vent_sessions_session_id ON vent_sessions(session_id);
+CREATE INDEX IF NOT EXISTS idx_vent_sessions_task_id ON vent_sessions(task_id);
+CREATE INDEX IF NOT EXISTS idx_feedback_memories_task_type ON feedback_memories(task_type);
+CREATE INDEX IF NOT EXISTS idx_feedback_memories_pain_direction ON feedback_memories(pain_direction);
 """
 
 

@@ -64,13 +64,65 @@ class FlowCraftApp:
         self.intent_engine = IntentEngine(self.model_gateway)
         self.tool_registry = ToolRegistry()
         self._register_builtin_tools(settings.allowed_paths)
-        self.planner = Planner(self.model_gateway, self.tool_registry, self.memory)
+
+        # ── Phase 1-3: Skills System ──────────────────────────
+        from flowcraft_core.skills.registry import SkillRegistry
+        from flowcraft_core.skills.skill_tool import SkillExecuteTool
+        skills_dir = getattr(settings, 'skills_dir', settings.allowed_paths[0] / "skills")
+        self.skill_registry = SkillRegistry(workspace_skills_dir=str(skills_dir))
+        self.skill_registry.discover_all()
+        # Register SkillExecuteTool so LLM can call skills
+        self.skill_execute_tool = SkillExecuteTool(self.skill_registry)
+        self.tool_registry.register(self.skill_execute_tool)
+        # Start hot-reload watcher (Phase 3)
+        self.skill_registry.start_hot_reload()
+
+        skills_loaded = len(self.skill_registry.list_skills())
+        logger.info("Skills system initialized: %d skills loaded", skills_loaded)
+
+        # ── Exec Tool + ApplyPatch ────────────────────────────
+        from flowcraft_core.approval.exec_approval import ExecApprovalManager
+        from flowcraft_core.tools.exec_tool import ExecTool
+        from flowcraft_core.tools.apply_patch import ApplyPatchTool
+
+        self.exec_approval_manager = ExecApprovalManager(
+            security_mode="allowlist",  # Start safe, user can switch to "full"
+            auto_approve_risk="LOW",     # LOW risk commands auto-approved
+            strict_inline_eval=True,     # Block python -c, node -e, etc.
+        )
+
+        workspace_dir = settings.allowed_paths[0] if settings.allowed_paths else Path.cwd()
+        self.exec_tool = ExecTool(
+            allowed_paths=settings.allowed_paths,
+            approval_manager=self.exec_approval_manager,
+            security_mode="allowlist",
+            default_timeout=120,
+            workspace_dir=workspace_dir,
+        )
+        self.tool_registry.register(self.exec_tool)
+
+        self.apply_patch_tool = ApplyPatchTool(
+            allowed_paths=settings.allowed_paths,
+            workspace_only=True,
+        )
+        self.tool_registry.register(self.apply_patch_tool)
+
+        logger.info(
+            "Exec tools registered: exec (mode=allowlist, auto_approve=LOW), "
+            "apply_patch (workspace_only=True)"
+        )
+
+        self.planner = Planner(self.model_gateway, self.tool_registry, self.memory,
+                               skill_registry=self.skill_registry)
         self.plan_validator = PlanValidator()
         self.policy_engine = PolicyEngine()
         self.approval_manager = ApprovalManager()
         self.task_store = TaskStore(self.db)
         self.checkpoint_manager = CheckpointManager(self.db)
         self.tool_harness = ToolHarness(self.tool_registry, self.policy_engine)
+        # Workspace directory for agent file operations (NOT source code dir)
+        workspace_dir = settings.allowed_paths[0] if settings.allowed_paths else Path.cwd()
+
         self.execution_engine = ExecutionEngine(
             model_gateway=self.model_gateway,
             tool_registry=self.tool_registry,
@@ -78,6 +130,9 @@ class FlowCraftApp:
             policy_engine=self.policy_engine,
             events=self.events,
             checkpoint_manager=self.checkpoint_manager,
+            workspace_dir=workspace_dir,
+            skill_registry=self.skill_registry,
+            settings=settings,
         )
         # Wire memory and knowledge into execution engine
         self.execution_engine._memory_manager = self.memory
@@ -101,6 +156,10 @@ class FlowCraftApp:
         if plugin_tools > 0:
             logger.info("Loaded %d plugin tools", plugin_tools)
 
+        # MCP (Model Context Protocol) integration — lazy init via startup()
+        self._mcp_registry: Any = None  # MCPToolRegistry, set by startup()
+        self._mcp_config_path: str | None = None  # auto-detect from .mcp.json
+
         # Long-term memory and knowledge base
         from flowcraft_core.memory.long_term import LongTermMemory
         self.long_term_memory = LongTermMemory(self.db, self.memory)
@@ -110,6 +169,22 @@ class FlowCraftApp:
         self.task_replay = TaskReplay(self.db, self.events)
         from flowcraft_core.config.i18n import I18n
         self.i18n = I18n()
+
+        # ── Feedback / Vent Mode ─────────────────────────────
+        from flowcraft_core.feedback.sentiment import FrustrationDetector
+        self.frustration_detector = FrustrationDetector(self.model_gateway)
+        from flowcraft_core.feedback.phrase_library import PhraseLibrary
+        self.phrase_library = PhraseLibrary(self.db)
+        self.phrase_library.initialize_presets()
+        from flowcraft_core.feedback.vent_session import VentSessionManager
+        self.vent_session_manager = VentSessionManager(self.db)
+        from flowcraft_core.feedback.agent_response_guard import AgentResponseSanitizer
+        self.agent_response_sanitizer = AgentResponseSanitizer(self.model_gateway)
+        from flowcraft_core.feedback.insight_mapper import InsightMapper
+        self.insight_mapper = InsightMapper(self.model_gateway)
+        from flowcraft_core.feedback.feedback_memory_integrator import FeedbackMemoryIntegrator
+        self.feedback_memory_integrator = FeedbackMemoryIntegrator(self.db, self.model_gateway)
+        logger.info("Feedback/Vent module initialized (Phase 2: LLM-enhanced)")
 
         # 启动卡死任务看门狗
         self._start_watchdog()
@@ -142,6 +217,18 @@ class FlowCraftApp:
             if t and hasattr(t, '_runtime'):
                 t._runtime = self.runtime
         self._recover_in_progress_tasks()
+
+    async def startup(self) -> None:
+        """Async startup: connect MCP servers and register their tools."""
+        from flowcraft_core.tools.mcp_client import register_mcp_tools
+        try:
+            mcp_count = await register_mcp_tools(
+                self.tool_registry, self._mcp_config_path
+            )
+            if mcp_count > 0:
+                logger.info("MCP startup: %d tools registered", mcp_count)
+        except Exception as exc:
+            logger.warning("MCP startup failed: %s", exc)
 
     def _auto_configure_model(self) -> None:
         """自动从环境变量或 settings 表加载模型配置。

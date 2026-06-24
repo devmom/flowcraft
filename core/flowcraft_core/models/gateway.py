@@ -93,13 +93,17 @@ class ModelGateway:
         """Switch the active model at runtime.
 
         Supports:
-        - DeepSeek: deepseek-v4-pro, deepseek-v4-flash, deepseek-chat
-        - Agnes:    agnes-2.0-flash, agnes-1.5-flash
+        - DeepSeek:  deepseek-v4-pro, deepseek-v4-flash, deepseek-chat
+        - Agnes:     agnes-2.0-flash, agnes-1.5-flash
+        - Anthropic: claude-opus-4-20250514, claude-sonnet-4-20250514, claude-3-5-haiku-20241022
 
         Returns True if switched successfully.
         """
         from flowcraft_core.models.adapters.agnes import (
             AGNES_2_FLASH_PROFILE, AGNES_1_5_FLASH_PROFILE, AgnesTextAdapter, is_agnes_llm,
+        )
+        from flowcraft_core.models.adapters.anthropic import (
+            ANTHROPIC_PROFILES, AnthropicAdapter, is_anthropic_model,
         )
 
         profiles: dict[str, ModelProfile] = {
@@ -108,6 +112,7 @@ class ModelGateway:
             "deepseek-chat": DEEPSEEK_CHAT_LEGACY,
             "agnes-2.0-flash": AGNES_2_FLASH_PROFILE,
             "agnes-1.5-flash": AGNES_1_5_FLASH_PROFILE,
+            **ANTHROPIC_PROFILES,
         }
         new_profile = profiles.get(model_id)
         if not new_profile:
@@ -116,7 +121,6 @@ class ModelGateway:
 
         key = api_key
         if not key and self._adapter:
-            # Reuse existing API key from current adapter
             key = getattr(self._adapter, '_api_key', None)
 
         if not key:
@@ -124,8 +128,9 @@ class ModelGateway:
             return False
 
         try:
-            # Use Agnes adapter for Agnes models, OpenAI adapter for DeepSeek
-            if is_agnes_llm(model_id):
+            if is_anthropic_model(model_id):
+                adapter = AnthropicAdapter(new_profile, api_key=key)
+            elif is_agnes_llm(model_id):
                 adapter = AgnesTextAdapter(new_profile, api_key=key)
             else:
                 adapter = OpenAICompatibleAdapter(new_profile, api_key=key)
@@ -228,11 +233,16 @@ class ModelGateway:
         return self._fallback_text(prompt)
 
     def _identity_text(self) -> str:
-        """One-line identity for structured output calls."""
+        """Identity for structured output calls with intent classification guidance."""
         profile = self._profile
         return (
             f"You are FlowCraft Agent v0.1.0 running on {profile.display_name} by {profile.provider}. "
-            f"Generate output matching the requested schema."
+            f"Generate output matching the requested schema. "
+            f"When classifying task_type: "
+            f"WORKFLOW_AUTOMATION is ONLY for creating/building NEW workflows. "
+            f"For listing/viewing/searching EXISTING workflows, use KNOWLEDGE_QA or QA. "
+            f"If the user asks 'what workflows do I have' or 'list workflows' or 'show workflows', "
+            f"that is NOT WORKFLOW_AUTOMATION — classify it as KNOWLEDGE_QA."
         )
 
     async def generate_structured(self, prompt: str, schema_name: str) -> dict[str, Any]:
@@ -277,6 +287,26 @@ class ModelGateway:
 
     def _heuristic_task_brief(self, text: str) -> dict[str, Any]:
         lower = text.lower()
+
+        # Phase 2: Extended task type detection
+        has_spreadsheet = any(w in text for w in ["excel", "表格", "xlsx", "xls", "csv", "spreadsheet", "工作表"])
+        has_email = any(w in text for w in ["邮件", "email", "发送邮件", "send email", "收件箱", "inbox"])
+        has_schedule = any(w in text for w in ["定时", "每天", "每周", "每月", "定期", "schedule", "cron", "daily", "weekly"])
+        has_knowledge = any(w in text for w in ["知识库", "文档问答", "检索", "知识问答", "knowledge base", "document qa"])
+        has_research = any(w in text for w in ["研究", "调研", "深度分析", "多步分析", "research", "deep analysis", "investigate"])
+
+        # Workflow intent detection (must come before other heuristics)
+        has_workflow_create = any(w in text for w in [
+            "创建工作流", "新建工作流", "制作工作流", "构建工作流", "生成工作流", "设计工作流",
+            "create workflow", "build workflow", "make workflow", "new workflow",
+            "create a workflow", "build a workflow",
+        ])
+        has_workflow_query = any(w in text for w in [
+            "有哪些工作流", "列出工作流", "查看工作流", "显示工作流", "工作流列表",
+            "list workflow", "show workflow", "view workflow", "workflow list",
+            "what workflow", "my workflow",
+        ])
+
         requires_file = (
             any(word in text for word in ["文件", "目录", "读取", "写入", "保存", "删除", "覆盖", "移动", "复制"])
             or any(word in lower for word in ["file", "delete", "remove", "overwrite", "move", "copy"])
@@ -290,30 +320,61 @@ class ModelGateway:
             risk = "HIGH"
         elif any(word in text for word in ["写入", "修改", "保存"]):
             risk = "MEDIUM"
+
+        # Priority-ordered type detection (Phase 2 types checked first)
         task_type = "QA"
-        capabilities: list[str] = []
-        if requires_file:
-            task_type = "FILE_TASK"
-            capabilities.append("file")
-        if requires_browser:
+
+        # Workflow routing: create → WORKFLOW_AUTOMATION, query → KNOWLEDGE_QA
+        if has_workflow_create:
+            task_type = "WORKFLOW_AUTOMATION"
+        elif has_workflow_query:
+            task_type = "KNOWLEDGE_QA"
+        elif has_research:
+            task_type = "MULTI_STEP_RESEARCH"
+        elif has_schedule:
+            task_type = "SCHEDULED_TASK"
+        elif has_email:
+            task_type = "EMAIL_ASSISTANT"
+        elif has_spreadsheet:
+            task_type = "SPREADSHEET_ANALYSIS"
+        elif has_knowledge:
+            task_type = "KNOWLEDGE_QA"
+
+        # Original types: last-match-wins ordering (command > browser > file > qa)
+        if requires_command and task_type not in ("WORKFLOW_AUTOMATION", "KNOWLEDGE_QA"):
+            task_type = "LOCAL_OPERATION"
+        if requires_browser and task_type not in ("LOCAL_OPERATION", "WORKFLOW_AUTOMATION", "KNOWLEDGE_QA"):
             task_type = "BROWSER_TASK"
+        if requires_file and task_type not in ("LOCAL_OPERATION", "BROWSER_TASK", "WORKFLOW_AUTOMATION", "KNOWLEDGE_QA"):
+            task_type = "FILE_TASK"
+
+        capabilities: list[str] = []
+        if requires_file or has_spreadsheet:
+            capabilities.append("file")
+        if requires_browser or has_research:
             capabilities.append("browser")
         if requires_command:
-            task_type = "LOCAL_OPERATION"
             capabilities.append("command")
+        if has_workflow_query:
+            capabilities.append("knowledge")
+
+        success_criteria = ["满足用户目标", "遵守权限和安全要求"]
+        if has_workflow_query:
+            success_criteria = ["列出用户可用的工作流并简要说明每个工作流的用途"]
+
         return {
             "objective": text,
             "task_type": task_type,
             "target_objects": [],
             "constraints": [],
             "required_capabilities": capabilities,
-            "requires_local_files": requires_file,
-            "requires_network": requires_browser,
+            "requires_local_files": requires_file or has_spreadsheet,
+            "requires_network": requires_browser or has_research,
             "requires_tools": bool(capabilities),
             "risk_level": risk,
             "clarification_required": False,
             "clarification_questions": [],
-            "success_criteria": ["满足用户目标", "遵守权限和安全要求"],
+            "success_criteria": success_criteria,
             "expected_output_format": "text",
         }
 
@@ -327,6 +388,60 @@ class ModelGateway:
             objective = text
             task_type = "QA"
             risk = "LOW"
+        if task_type == "MULTI_STEP_RESEARCH":
+            return {
+                "mode": "DAG",
+                "goal": objective,
+                "steps": [
+                    {"index": 1, "title": "信息收集", "objective": "通过浏览器和知识库收集相关信息", "action_type": "TOOL", "required_tools": ["browser.read", "knowledge.search"], "expected_output": "收集到的原始信息", "risk_level": "LOW", "approval_required": False},
+                    {"index": 2, "title": "信息整理", "objective": "整理和分析收集到的信息", "action_type": "PREPARE", "required_tools": [], "expected_output": "结构化的分析结果", "risk_level": "LOW", "approval_required": False},
+                    {"index": 3, "title": "深度分析", "objective": "对整理后的信息进行深度分析和推理", "action_type": "MODEL_ANSWER", "required_tools": [], "expected_output": "深度分析结论", "risk_level": "LOW", "approval_required": False},
+                ],
+                "constraints": [], "success_criteria": ["完成多角度分析"], "risk_points": [], "approval_points": [], "fallback_strategy": {}, "stop_conditions": [],
+            }
+        if task_type == "SPREADSHEET_ANALYSIS":
+            return {
+                "mode": "LINEAR",
+                "goal": objective,
+                "steps": [
+                    {"index": 1, "title": "读取表格", "objective": "读取Excel/CSV文件内容", "action_type": "TOOL", "required_tools": ["document.xlsx.read", "file.read"], "expected_output": "表格数据", "risk_level": "LOW", "approval_required": False},
+                    {"index": 2, "title": "数据分析", "objective": "分析表格数据，提取关键指标", "action_type": "MODEL_ANSWER", "required_tools": [], "expected_output": "分析结果", "risk_level": "LOW", "approval_required": False},
+                    {"index": 3, "title": "生成报告", "objective": "生成分析报告或汇总", "action_type": "FINALIZE", "required_tools": ["file.write"], "expected_output": "分析报告", "risk_level": "MEDIUM", "approval_required": True},
+                ],
+                "constraints": [], "success_criteria": ["完成表格分析"], "risk_points": ["写入文件"], "approval_points": ["生成报告需要确认"], "fallback_strategy": {}, "stop_conditions": [],
+            }
+        if task_type == "EMAIL_ASSISTANT":
+            return {
+                "mode": "LINEAR",
+                "goal": objective,
+                "steps": [
+                    {"index": 1, "title": "确认邮件内容", "objective": "确认收件人、主题和正文内容", "action_type": "PREPARE", "required_tools": [], "expected_output": "邮件草稿", "risk_level": "LOW", "approval_required": False},
+                    {"index": 2, "title": "撰写邮件", "objective": "根据需求撰写邮件内容", "action_type": "MODEL_ANSWER", "required_tools": [], "expected_output": "完整邮件内容", "risk_level": "LOW", "approval_required": False},
+                    {"index": 3, "title": "保存邮件", "objective": "将邮件保存为文件供用户发送", "action_type": "TOOL", "required_tools": ["file.write"], "expected_output": "邮件文件", "risk_level": "MEDIUM", "approval_required": True},
+                ],
+                "constraints": [], "success_criteria": ["生成可发送的邮件"], "risk_points": [], "approval_points": ["保存文件需确认"], "fallback_strategy": {}, "stop_conditions": [],
+            }
+        if task_type == "SCHEDULED_TASK":
+            return {
+                "mode": "LINEAR",
+                "goal": objective,
+                "steps": [
+                    {"index": 1, "title": "确认定时规则", "objective": "确认执行频率、时间、触发条件", "action_type": "PREPARE", "required_tools": [], "expected_output": "定时规则", "risk_level": "LOW", "approval_required": False},
+                    {"index": 2, "title": "设计工作流", "objective": "根据定时规则设计自动执行的工作流", "action_type": "PREPARE", "required_tools": [], "expected_output": "工作流设计", "risk_level": "LOW", "approval_required": False},
+                    {"index": 3, "title": "保存定时工作流", "objective": "保存为可定时执行的工作流模板", "action_type": "FINALIZE", "required_tools": [], "expected_output": "定时工作流", "risk_level": "LOW", "approval_required": False},
+                ],
+                "constraints": [], "success_criteria": ["创建可用的定时任务"], "risk_points": [], "approval_points": [], "fallback_strategy": {}, "stop_conditions": [],
+            }
+        if task_type == "KNOWLEDGE_QA":
+            return {
+                "mode": "LINEAR",
+                "goal": objective,
+                "steps": [
+                    {"index": 1, "title": "检索知识库", "objective": "在知识库中搜索相关信息", "action_type": "TOOL", "required_tools": ["knowledge.search"], "expected_output": "相关知识条目", "risk_level": "LOW", "approval_required": False},
+                    {"index": 2, "title": "综合分析", "objective": "综合分析检索到的知识给出答案", "action_type": "MODEL_ANSWER", "required_tools": [], "expected_output": "基于知识库的回答", "risk_level": "LOW", "approval_required": False},
+                ],
+                "constraints": [], "success_criteria": ["基于知识库准确回答"], "risk_points": [], "approval_points": [], "fallback_strategy": {}, "stop_conditions": [],
+            }
         if task_type == "QA":
             return {
                 "mode": "DIRECT",
@@ -386,7 +501,7 @@ class ModelGateway:
                 "type": "object",
                 "properties": {
                     "objective": {"type": "string"},
-                    "task_type": {"type": "string", "enum": ["QA", "FILE_TASK", "BROWSER_TASK", "LOCAL_OPERATION", "DOCUMENT_SUMMARY", "WORKFLOW_AUTOMATION"]},
+                    "task_type": {"type": "string", "enum": ["QA", "FILE_TASK", "BROWSER_TASK", "LOCAL_OPERATION", "DOCUMENT_SUMMARY", "WORKFLOW_AUTOMATION", "SPREADSHEET_ANALYSIS", "EMAIL_ASSISTANT", "SCHEDULED_TASK", "KNOWLEDGE_QA", "MULTI_STEP_RESEARCH"], "description": "WORKFLOW_AUTOMATION is ONLY for creating/building NEW workflows. For listing/viewing/searching EXISTING workflows, use KNOWLEDGE_QA."},
                     "target_objects": {"type": "array", "items": {"type": "string"}},
                     "constraints": {"type": "array", "items": {"type": "string"}},
                     "required_capabilities": {"type": "array", "items": {"type": "string"}},

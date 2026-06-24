@@ -34,12 +34,13 @@ class FailureType(enum.StrEnum):
     POLICY_BLOCKED = "POLICY_BLOCKED"
     TIMEOUT = "TIMEOUT"
     STEP_LIMIT = "STEP_LIMIT"
+    USER_FRUSTRATION = "USER_FRUSTRATION"
     UNKNOWN = "UNKNOWN"
 
 
 # 回退策略
 RETRY_POLICY: dict[FailureType, dict] = {
-    FailureType.MODEL_ERROR:       {"max_retries": 3, "base_delay": 2.0, "backoff": 2.0, "terminal": False},
+    FailureType.MODEL_ERROR:       {"max_retries": 1, "base_delay": 2.0, "backoff": 2.0, "terminal": False},
     FailureType.MODEL_PARSE_ERROR: {"max_retries": 2, "base_delay": 0.5, "backoff": 1.0, "terminal": False},
     FailureType.TOOL_ERROR:        {"max_retries": 2, "base_delay": 1.0, "backoff": 1.5, "terminal": False},
     FailureType.PERMISSION_DENIED: {"max_retries": 0, "base_delay": 0,   "backoff": 0,   "terminal": True},
@@ -48,6 +49,7 @@ RETRY_POLICY: dict[FailureType, dict] = {
     FailureType.POLICY_BLOCKED:    {"max_retries": 0, "base_delay": 0,   "backoff": 0,   "terminal": True},
     FailureType.TIMEOUT:           {"max_retries": 1, "base_delay": 3.0, "backoff": 0,   "terminal": False},
     FailureType.STEP_LIMIT:        {"max_retries": 0, "base_delay": 0,   "backoff": 0,   "terminal": True},
+    FailureType.USER_FRUSTRATION: {"max_retries": 0, "base_delay": 0,   "backoff": 0,   "terminal": False},
     FailureType.UNKNOWN:           {"max_retries": 1, "base_delay": 1.0, "backoff": 0,   "terminal": True},
 }
 
@@ -76,6 +78,7 @@ class FailureInfo:
             FailureType.POLICY_BLOCKED:    f"安全策略已拦截此操作：{self.message}",
             FailureType.TIMEOUT:           "操作超时",
             FailureType.STEP_LIMIT:        "步骤执行轮数超限，任务终止",
+            FailureType.USER_FRUSTRATION: "用户对执行结果表达了不满，已记录反馈",
             FailureType.UNKNOWN:           f"未知错误：{self.message}",
         }
         return messages.get(self.failure_type, self.message)
@@ -87,7 +90,7 @@ def classify_exception(exc: Exception, context: str = "") -> FailureInfo:
         return FailureInfo(FailureType.TIMEOUT, str(exc), exc, {"context": context})
     if "permission" in msg or "access denied" in msg or "forbidden" in msg:
         return FailureInfo(FailureType.PERMISSION_DENIED, str(exc), exc, {"context": context})
-    if "json" in msg or "parse" in msg or "decode" in msg:
+    if "json" in msg or "parse" in msg or "decode" in msg or "structured output" in msg:
         return FailureInfo(FailureType.MODEL_PARSE_ERROR, str(exc), exc, {"context": context})
     if any(kw in msg for kw in ("api", "rate limit", "quota", "unauthorized", "model", "token")):
         return FailureInfo(FailureType.MODEL_ERROR, str(exc), exc,

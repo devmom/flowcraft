@@ -1,6 +1,12 @@
-"""Plugin System - Third-party tool plugin manifest, discovery, installation."""
+"""Plugin System — Third-party tool plugin manifest, discovery, installation.
+
+Phase 2 additions:
+- Plugin signature verification (SHA-256 manifest hash)
+- Plugin isolation: tool execution wrapped in try/except to prevent crashes
+"""
 from __future__ import annotations
 
+import hashlib
 import importlib
 import json
 import logging
@@ -28,6 +34,7 @@ class PluginManifest:
     dependencies: list[str] = field(default_factory=list)
     permissions: list[str] = field(default_factory=list)
     min_flowcraft_version: str = "0.1.0"
+    signature: str = ""  # SHA-256 hash of manifest content (Phase 2)
     homepage: str = ""
     license: str = "MIT"
 
@@ -174,6 +181,92 @@ class PluginRegistry:
         except Exception as exc:
             logger.warning("Plugin state load fail: %s", exc)
 
+    # ── Phase 2: Signature Verification ──────────────────────
+
+    @staticmethod
+    def compute_signature(manifest: PluginManifest) -> str:
+        """Compute SHA-256 signature of manifest content (excluding signature field)."""
+        sig = manifest.signature
+        manifest.signature = ""  # exclude self from hash
+        try:
+            raw = json.dumps(manifest.to_dict(), sort_keys=True, ensure_ascii=False)
+            return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+        finally:
+            manifest.signature = sig
+
+    @staticmethod
+    def verify_signature(manifest: PluginManifest) -> bool:
+        """Verify manifest integrity against its stored signature."""
+        if not manifest.signature:
+            return False  # unsigned
+        expected = PluginRegistry.compute_signature(manifest)
+        return expected == manifest.signature
+
+    def install_verified(self, manifest: PluginManifest, source_path: Path) -> InstalledPlugin | None:
+        """Install plugin with signature verification.
+
+        Returns None if signature verification fails (tampered manifest).
+        """
+        if manifest.signature and not self.verify_signature(manifest):
+            logger.error("Plugin signature verification FAILED: %s v%s — manifest may be tampered",
+                         manifest.name, manifest.version)
+            return None
+        # Display permissions to user (logged for now; UI integration in Phase 3)
+        self._log_permissions(manifest)
+        return self.install(manifest, source_path)
+
+    # ── Phase 2: Plugin Isolation ────────────────────────────
+
+    def load_tools_isolated(self, tool_registry) -> int:
+        """Load plugin tools with per-tool isolation.
+
+        Each tool class is wrapped so that any exception during execution
+        is caught and logged, preventing a single plugin crash from
+        bringing down the entire FlowCraft process.
+        """
+        count = 0
+        for plugin in self._installed.values():
+            if not plugin.enabled:
+                continue
+            for td in plugin.manifest.tools:
+                entry = td.get("entry_point", "")
+                if not entry or ":" not in entry:
+                    continue
+                try:
+                    mod_path, cls_name = entry.rsplit(":", 1)
+                    module = __import__(mod_path, fromlist=[cls_name])
+                    cls = getattr(module, cls_name)
+                    definition = ToolDefinition(
+                        tool_name=td["tool_name"],
+                        display_name=td.get("display_name", td["tool_name"]),
+                        description=td.get("description", ""),
+                        category=td.get("category", "custom"),
+                        risk_level=RiskLevel(td.get("risk_level", "LOW")),
+                        permissions=td.get("permissions", []),
+                        requires_approval_by_default=td.get("requires_approval", False),
+                    )
+                    instance = cls()
+                    instance.definition = definition
+                    # Wrap with isolation
+                    isolated = _IsolatedToolWrapper(instance, plugin.plugin_id)
+                    tool_registry.register(isolated)
+                    plugin.tools_registered.append(td["tool_name"])
+                    self._tool_sources[td["tool_name"]] = plugin.plugin_id
+                    count += 1
+                except Exception as exc:
+                    logger.error("Plugin tool load failed (isolated): %s from %s — %s",
+                                 entry, plugin.manifest.name, exc)
+        return count
+
+    @staticmethod
+    def _log_permissions(manifest: PluginManifest) -> None:
+        """Log the permissions a plugin declares for user review."""
+        perms = manifest.permissions or ["(no permissions declared)"]
+        logger.info(
+            "Plugin [%s v%s] requests permissions: %s",
+            manifest.name, manifest.version, ", ".join(perms),
+        )
+
     def _save_state(self) -> None:
         sf = self.plugins_dir / "plugin_state.json"
         data = {
@@ -188,3 +281,35 @@ class PluginRegistry:
             ]
         }
         sf.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+# ── Phase 2: Isolated Tool Wrapper ────────────────────────────
+
+class _IsolatedToolWrapper(Tool):
+    """Wraps a plugin tool to catch and isolate exceptions.
+
+    If a plugin tool raises an unhandled exception, the wrapper catches it,
+    logs the error, and returns a safe error message — preventing the crash
+    from propagating to FlowCraft's main execution loop.
+    """
+
+    def __init__(self, inner: Tool, plugin_id: str) -> None:
+        self._inner = inner
+        self._plugin_id = plugin_id
+        # Forward definition so ToolRegistry sees it
+        self.definition = inner.definition
+
+    async def execute(self, **kwargs: Any) -> dict[str, Any]:
+        try:
+            return await self._inner.execute(**kwargs)
+        except Exception as exc:
+            logger.error(
+                "Plugin tool [%s/%s] crashed during execution: %s",
+                self._plugin_id, self.definition.tool_name, exc,
+            )
+            return {
+                "status": "error",
+                "error": f"Plugin tool execution failed: {exc}",
+                "plugin_id": self._plugin_id,
+                "tool_name": self.definition.tool_name,
+            }

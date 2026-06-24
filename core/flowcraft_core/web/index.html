@@ -4,6 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>FlowCraft — Agent Workflow</title>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <style>
     :root {
       --bg: #0d1117;
@@ -128,6 +129,47 @@
     .session-dot.err { background: var(--red); }
     .session-dot.run { background: var(--accent); }
 
+    /* ── Debug info bar (session/task IDs) ── */
+    .debug-bar {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      padding: 6px 16px;
+      background: rgba(88,166,255,0.04);
+      border-bottom: 1px solid rgba(48,54,61,0.5);
+      font-size: 11px;
+      font-family: var(--font-mono);
+      color: var(--text-muted);
+      flex-shrink: 0;
+      flex-wrap: wrap;
+    }
+    .debug-bar .debug-label {
+      color: var(--text-secondary);
+      font-weight: 500;
+      margin-right: 4px;
+      font-family: var(--font);
+      letter-spacing: 0.3px;
+    }
+    .debug-bar .debug-id {
+      color: var(--text-muted);
+      cursor: pointer;
+      padding: 2px 6px;
+      border-radius: 3px;
+      background: var(--bg-tertiary);
+      transition: all 0.15s;
+      user-select: all;
+      white-space: nowrap;
+    }
+    .debug-bar .debug-id:hover {
+      color: var(--accent);
+      background: rgba(88,166,255,0.1);
+    }
+    .debug-bar .debug-copied {
+      color: var(--green);
+      font-size: 10px;
+      animation: fadeIn 0.2s ease;
+    }
+
     /* ── Main chat area ──────────────── */
     .chat {
       flex: 1;
@@ -217,6 +259,94 @@
       margin-left: auto;
       font-weight: 400;
     }
+
+    /* ── Markdown rendered content ──── */
+    .msg-body .md-content { line-height: 1.6; }
+    .msg-body .md-content h1 { font-size: 1.4em; font-weight: 600; color: var(--text); margin: 16px 0 8px; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
+    .msg-body .md-content h2 { font-size: 1.25em; font-weight: 600; color: var(--text); margin: 14px 0 6px; padding-bottom: 4px; border-bottom: 1px solid var(--border); }
+    .msg-body .md-content h3 { font-size: 1.1em; font-weight: 600; color: var(--text); margin: 12px 0 4px; }
+    .msg-body .md-content h4, .msg-body .md-content h5, .msg-body .md-content h6 { font-size: 1em; font-weight: 600; color: var(--text-secondary); margin: 10px 0 4px; }
+    .msg-body .md-content p { margin: 4px 0 8px; }
+    .msg-body .md-content strong { color: #fff; font-weight: 600; }
+    .msg-body .md-content em { color: var(--text-secondary); }
+    .msg-body .md-content a { color: var(--accent); text-decoration: none; }
+    .msg-body .md-content a:hover { text-decoration: underline; }
+    .msg-body .md-content blockquote {
+      border-left: 3px solid var(--accent-dim);
+      margin: 8px 0;
+      padding: 4px 12px;
+      color: var(--text-secondary);
+      background: rgba(31,111,235,0.06);
+      border-radius: 0 4px 4px 0;
+    }
+    .msg-body .md-content code {
+      font-family: var(--font-mono);
+      font-size: 11.5px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      padding: 1px 5px;
+      color: var(--amber);
+    }
+    .msg-body .md-content pre {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 12px 14px;
+      margin: 8px 0;
+      overflow-x: auto;
+      max-height: 400px;
+      overflow-y: auto;
+    }
+    .msg-body .md-content pre code {
+      background: transparent;
+      border: 0;
+      padding: 0;
+      color: var(--text-secondary);
+      font-size: 12px;
+      line-height: 1.55;
+      white-space: pre;
+    }
+    .msg-body .md-content ul, .msg-body .md-content ol {
+      margin: 4px 0 8px;
+      padding-left: 20px;
+    }
+    .msg-body .md-content li { margin: 2px 0; line-height: 1.5; }
+    .msg-body .md-content li > ul, .msg-body .md-content li > ol { margin: 2px 0; }
+    .msg-body .md-content hr {
+      border: 0;
+      border-top: 1px solid var(--border);
+      margin: 14px 0;
+    }
+    .msg-body .md-content table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 8px 0;
+      font-size: 12px;
+    }
+    .msg-body .md-content table th {
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border);
+      padding: 6px 10px;
+      text-align: left;
+      font-weight: 600;
+      color: var(--text);
+    }
+    .msg-body .md-content table td {
+      border: 1px solid var(--border);
+      padding: 5px 10px;
+      color: var(--text-secondary);
+    }
+    .msg-body .md-content table tr:nth-child(even) td {
+      background: rgba(255,255,255,0.02);
+    }
+    .msg-body .md-content img {
+      max-width: 100%;
+      border-radius: 4px;
+      border: 1px solid var(--border);
+      margin: 4px 0;
+    }
+    .msg-body .md-content .katex { font-size: 1.05em; }
 
     /* Thinking / status text */
     .thinking { color: var(--text-secondary); font-style: italic; font-size: 12px; }
@@ -392,6 +522,149 @@
     }
     @keyframes spin { to { transform: rotate(360deg); } }
 
+    /* ── Vent Panel (Modal) ──────────────────── */
+    .vent-overlay {
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,0.6);
+      display: flex; align-items: center; justify-content: center;
+      z-index: 5000;
+    }
+    .vent-overlay.hidden { display: none; }
+    .vent-panel {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      width: 520px; max-width: 90vw;
+      max-height: 85vh; overflow-y: auto;
+      padding: 24px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.5);
+    }
+    .vent-panel h3 {
+      font-size: 16px; margin: 0 0 4px;
+      display: flex; align-items: center; gap: 8px;
+    }
+    .vent-panel .vent-subtitle {
+      font-size: 12px; color: var(--text-muted);
+      margin-bottom: 16px;
+    }
+    .vent-phrase-group {
+      margin-bottom: 12px;
+    }
+    .vent-phrase-group-title {
+      font-size: 11px; font-weight: 600;
+      color: var(--text-secondary);
+      margin-bottom: 6px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .vent-phrase-list {
+      display: flex; flex-wrap: wrap; gap: 6px;
+    }
+    .vent-phrase-chip {
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 6px 12px;
+      font-size: 12px;
+      color: var(--text-secondary);
+      cursor: pointer;
+      transition: all 0.15s;
+      max-width: 100%;
+      text-align: left;
+    }
+    .vent-phrase-chip:hover {
+      border-color: var(--accent-dim);
+      color: var(--text);
+    }
+    .vent-phrase-chip.selected {
+      border-color: var(--accent);
+      background: rgba(88,166,255,0.12);
+      color: var(--accent);
+      font-weight: 500;
+    }
+    .vent-template-section {
+      margin-top: 16px;
+      padding-top: 16px;
+      border-top: 1px solid var(--border);
+    }
+    .vent-template-section h4 {
+      font-size: 13px; margin: 0 0 8px;
+      color: var(--text-secondary);
+    }
+    .vent-field {
+      margin-bottom: 10px;
+    }
+    .vent-field label {
+      display: block;
+      font-size: 11px; color: var(--text-muted);
+      margin-bottom: 4px;
+    }
+    .vent-field .field-prefill {
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 8px 10px;
+      font-size: 12px; color: var(--text);
+      font-family: var(--font-mono);
+      word-break: break-all;
+    }
+    .vent-field textarea {
+      width: 100%;
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 8px 10px;
+      font-size: 12px; color: var(--text);
+      font-family: var(--font);
+      resize: vertical;
+      min-height: 48px;
+    }
+    .vent-field textarea:focus {
+      outline: none;
+      border-color: var(--accent-dim);
+    }
+    .vent-field .field-hint {
+      font-size: 10px; color: var(--text-muted);
+      margin-top: 2px;
+    }
+    .vent-actions {
+      display: flex; gap: 8px; justify-content: flex-end;
+      margin-top: 16px; padding-top: 12px;
+      border-top: 1px solid var(--border);
+    }
+    .vent-actions button {
+      padding: 8px 16px;
+      border-radius: 6px;
+      font-size: 12px; font-weight: 500;
+      cursor: pointer;
+    }
+    .btn-vent-submit {
+      background: var(--accent-dim);
+      border: 0; color: white;
+    }
+    .btn-vent-submit:hover { background: var(--accent); }
+    .btn-vent-submit:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn-vent-skip {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--text-secondary);
+    }
+    .btn-vent-skip:hover { color: var(--text); border-color: var(--text-muted); }
+    .vent-severity-badge {
+      font-size: 10px; padding: 2px 8px; border-radius: 10px;
+      font-weight: 600;
+    }
+    .vent-severity-light { background: rgba(210,153,34,0.2); color: var(--amber); }
+    .vent-severity-medium { background: rgba(210,153,34,0.3); color: var(--amber); }
+    .vent-severity-heavy { background: rgba(248,81,73,0.25); color: var(--red); }
+    .vent-closing {
+      margin-top: 12px; padding: 10px;
+      background: rgba(63,185,80,0.1);
+      border: 1px solid rgba(63,185,80,0.2);
+      border-radius: 8px;
+      font-size: 12px; color: var(--green);
+    }
+
     /* Responsive */
     @media (max-width: 700px) {
       .sidebar { display: none; }
@@ -405,6 +678,7 @@
     <span>FlowCraft</span>
   </div>
   <div class="topbar-right" style="display:flex;align-items:center;gap:12px;">
+    <span id="tokenDisplay" style="font-size:11px;color:var(--text-muted);display:none;" title="Token consumption for current task"></span>
     <span id="healthText" style="font-size:12px;color:var(--text-secondary);">connecting...</span>
     <button onclick="openKBSearch()" style="background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:14px;" title="Knowledge Base">&#128218;</button>
     <button onclick="openWorkflowList()" style="background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:16px;" title="Workflow List">📦</button>
@@ -468,6 +742,59 @@
       </div>
     </div>
   </main>
+</div>
+
+<!-- ── Vent Panel (Agent Vent Mode) ────────────────────────── -->
+<div class="vent-overlay hidden" id="ventOverlay">
+  <div class="vent-panel" id="ventPanel">
+    <h3>
+      <span id="ventEmoji">😤</span>
+      <span id="ventTitle">发泄一下</span>
+      <span class="vent-severity-badge" id="ventBadge">轻度</span>
+    </h3>
+    <div class="vent-subtitle" id="ventSubtitle">你的反馈会被认真对待，并用于改进 Agent</div>
+
+    <!-- Phrase selection area -->
+    <div id="ventPhraseArea">
+      <div style="font-size:11px;color:var(--text-muted);margin-bottom:8px;">
+        选择一条吐槽（可选）— 帮助系统精准定位问题:
+      </div>
+      <div id="ventPhraseGroups"></div>
+    </div>
+
+    <!-- Structured template -->
+    <div class="vent-template-section" id="ventTemplateSection">
+      <h4>📋 发生了什么？</h4>
+      <div class="vent-field">
+        <label>你让我做什么:</label>
+        <div class="field-prefill" id="ventFieldObjective">（等待任务信息...）</div>
+      </div>
+      <div class="vent-field">
+        <label>但实际上你做了:</label>
+        <div class="field-prefill" id="ventFieldAction">（等待上下文信息...）</div>
+      </div>
+      <div class="vent-field">
+        <label>最让人生气的是: <span style="color:var(--red);">*</span></label>
+        <textarea id="ventFieldPain" placeholder="具体哪里出了问题？例如：你没有先确认文件路径就去读了..."></textarea>
+        <div class="field-hint" id="ventFieldPainHint"></div>
+      </div>
+      <div class="vent-field">
+        <label>我觉得你应该:</label>
+        <textarea id="ventFieldSuggestion" placeholder="你有什么建议？例如：下次先确认文件存在再读"></textarea>
+      </div>
+    </div>
+
+    <!-- Closing message (shown after submit) -->
+    <div class="vent-closing hidden" id="ventClosing"></div>
+
+    <!-- Actions -->
+    <div class="vent-actions">
+      <button class="btn-vent-skip" onclick="closeVentPanel()">跳过，继续对话</button>
+      <button class="btn-vent-submit" id="btnVentSubmit" onclick="submitVent()">
+        提交反馈
+      </button>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -537,11 +864,17 @@
     if (events.length === 0 && !forceComplete) {
       const txt = isPaused ? "任务已暂停" : "Agent 工作中...";
       const sp = isPaused ? "" : `<div class="spinner"></div>`;
-      convEl.innerHTML = `<div class="waiting">${sp}<span style="color:var(--text-secondary);font-size:13px;">${txt}</span></div>`;
+      const debugBar = taskId ? buildDebugBar(taskId) : "";
+      convEl.innerHTML = `${debugBar}<div class="waiting">${sp}<span style="color:var(--text-secondary);font-size:13px;">${txt}</span></div>`;
       return;
     }
 
     let html = "";
+
+    // ── Debug bar: session_id + task_id (click to copy) ──
+    if (taskId) {
+      html += buildDebugBar(taskId);
+    }
 
     // 显示当前会话的任务标题
     const activeSession = sessions.find(s => s.task_id === taskId);
@@ -568,35 +901,36 @@
         const agentMsg = payload.agent_message || msg || "已进入工作流构建模式";
         html += `<div class="msg msg-system" style="margin:8px 0;">
           <div class="msg-header"><span class="dot purple"></span>AGENT<span class="msg-time">${time}</span></div>
-          <div class="msg-body" style="white-space:pre-wrap;">${esc(agentMsg)}</div>
+          <div class="msg-body"><div class="md-content">${renderMd(agentMsg)}</div></div>
         </div>`;
       }
       // ── Progress updates: show as status messages ──
       else if (e.event_type === "progress.update") {
         html += `<div style="padding:4px 12px;color:var(--text-muted);font-size:12px;font-style:italic;">${esc(msg)}</div>`;
       }
-      // ── Step answers & task completion ──
+      // ── Step answers & task completion (markdown rendered) ──
       else if (e.event_type === "step.answer" || e.event_type === "task.completed") {
         const output = e.payload?.output || msg;
+        const rendered = renderMd(output);
         html += `<div class="msg ${st.cls}">
           <div class="msg-header"><span class="dot ${st.dot}"></span>${st.label}<span class="msg-time">${time}</span></div>
-          <div class="msg-body"><pre>${esc(output)}</pre></div>
+          <div class="msg-body"><div class="md-content">${rendered}</div></div>
         </div>`;
       } else if (e.event_type === "tool.completed") {
         const payload = e.payload || {};
         const output = payload.output || {};
         const detail = Object.keys(output).length
-          ? JSON.stringify(output, null, 2).substring(0, 800)
-          : JSON.stringify(payload, null, 2).substring(0, 500);
+          ? JSON.stringify(output, null, 2)
+          : JSON.stringify(payload, null, 2);
         html += `<div class="msg ${st.cls}">
           <div class="msg-header"><span class="dot ${st.dot}"></span>${st.label}<span class="msg-time">${time}</span></div>
-          <div class="msg-body">${esc(msg)}<pre>${esc(detail)}</pre></div>
+          <div class="msg-body"><div class="md-content">${renderMd(msg)}</div><pre>${esc(detail)}</pre></div>
         </div>`;
       } else if (e.event_type === "approval.requested") {
         html += `<div class="msg ${st.cls}">
           <div class="msg-header"><span class="dot ${st.dot}"></span>${st.label}<span class="msg-time">${time}</span></div>
           <div class="msg-body">
-            <p>${esc(msg)}</p>
+            <div class="md-content">${renderMd(msg)}</div>
             <div style="margin-top:8px;display:flex;gap:6px;">
               <button onclick="approveTask('${esc(taskId)}')" style="background:var(--green-dim);border:0;border-radius:4px;color:#fff;padding:6px 14px;cursor:pointer;font-size:12px;">批准执行</button>
               <button onclick="cancelTask('${esc(taskId)}')" style="background:var(--red-dim);border:0;border-radius:4px;color:#fff;padding:6px 14px;cursor:pointer;font-size:12px;">取消</button>
@@ -606,12 +940,12 @@
       } else if (e.event_type === "task.failed" || e.event_type === "step.failed") {
         html += `<div class="msg ${st.cls}">
           <div class="msg-header"><span class="dot ${st.dot}"></span>${st.label}<span class="msg-time">${time}</span></div>
-          <div class="msg-body">${esc(msg)}</div>
+          <div class="msg-body"><div class="md-content">${renderMd(msg)}</div></div>
         </div>`;
       } else {
         html += `<div class="msg ${st.cls}">
           <div class="msg-header"><span class="dot ${st.dot}"></span>${st.label}<span class="msg-time">${time}</span></div>
-          <div class="msg-body">${esc(msg)}</div>
+          <div class="msg-body"><div class="md-content">${renderMd(msg)}</div></div>
         </div>`;
       }
     }
@@ -757,6 +1091,7 @@
       const allEvents = eventsData.events || [];
 
       renderConversation(allEvents, task.status, latestTaskId);
+      updateTokenStats(latestTaskId);
 
       if (["COMPLETED", "FAILED", "CANCELLED", "PAUSED"].includes(task.status)) {
         stopPoll();
@@ -787,9 +1122,31 @@
   }
 
   // ── Task Creation (with session continuity) ───────────────
+  let ventPendingText = null;  // text that was being sent when vent was triggered
+
   async function createTask() {
     const text = inputEl.value.trim();
     if (!text) return;
+
+    // ── Vent detection: check for frustration first ──────────
+    // Skip vent check for very short messages or if vent panel already open
+    if (text.length > 4 && document.getElementById("ventOverlay").classList.contains("hidden")) {
+      const detection = await detectFrustration(
+        text, activeSessionId || "default", activeTaskId || ""
+      );
+      if (detection && detection.should_trigger_vent) {
+        // Save pending text and show vent panel instead
+        ventPendingText = text;
+        await showVentPanel(detection);
+        return;  // Don't create task yet — user will vent or skip
+      }
+    }
+
+    await _doCreateTask(text);
+    inputEl.value = "";
+  }
+
+  async function _doCreateTask(text) {
     createBtn.disabled = true;
     createBtn.textContent = "...";
 
@@ -806,18 +1163,13 @@
 
       activeTaskId = task.task_id;
       activeSessionId = sessionId;
-      inputEl.value = "";
       inputEl.placeholder = "继续对话... (Enter 发送)";
 
-      // Stop any SSE from previous task to prevent cross-contamination
       stopSSE();
       stopPoll();
       streamedEvents = [];
 
-      // Immediately show user's message before loading events
       showUserMessage(text);
-
-      // Load existing events + start streaming
       await loadSessionEvents(sessionId, task.task_id);
       await loadSessions();
 
@@ -945,6 +1297,7 @@
     const isApproval = newEvent.event_type === "approval.requested" || streamedEvents.some(e => e.event_type === "approval.requested");
     const status = isComplete ? "COMPLETED" : isApproval ? "WAITING_APPROVAL" : "EXECUTING";
     renderConversation(streamedEvents, status, taskId);
+    if (isComplete) updateTokenStats(taskId);
   }
 
   // ── Polling (fallback) ────────────────────────────────────
@@ -1014,6 +1367,31 @@
     }
   }
 
+  // ── Token Stats ─────────────────────────────────────────────
+  async function updateTokenStats(taskId) {
+    if (!taskId) { tokenDisplay.style.display = 'none'; return; }
+    try {
+      const res = await fetch('/api/tasks/' + taskId + '/model-stats');
+      const data = await res.json();
+      if (data.total_tokens > 0) {
+        const tk = data.total_tokens >= 1000
+          ? (data.total_tokens / 1000).toFixed(1) + 'k'
+          : data.total_tokens;
+        let html = '⚡ ' + tk + ' tokens';
+        if (data.total_cost > 0) {
+          html += ' · $' + data.total_cost.toFixed(4);
+        }
+        html += ' (' + data.call_count + ' calls)';
+        tokenDisplay.innerHTML = html;
+        tokenDisplay.style.display = 'inline';
+      } else {
+        tokenDisplay.style.display = 'none';
+      }
+    } catch (e) {
+      tokenDisplay.style.display = 'none';
+    }
+  }
+
   // Custom session titles (persisted in localStorage)
   let sessionTitles = {};
   try { sessionTitles = JSON.parse(localStorage.getItem('flowcraft_titles') || '{}'); } catch(e) {}
@@ -1058,7 +1436,93 @@
   // ── Helpers ───────────────────────────────────────────────
   function esc(s) {
     return String(s || "").replaceAll("&", "&amp;").replaceAll("<", "&lt;")
-      .replaceAll(">", "&gt;").replaceAll('"', "&quot;");
+      .replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
+  }
+
+  function buildDebugBar(taskId) {
+    const sid = activeSessionId || "";
+    return `<div class="debug-bar">
+      <span><span class="debug-label">Session:</span><span class="debug-id" onclick="copyDebugId('${esc(sid)}',this)" title="点击复制">${esc(sid)}</span></span>
+      <span><span class="debug-label">Task:</span><span class="debug-id" onclick="copyDebugId('${esc(taskId)}',this)" title="点击复制">${esc(taskId)}</span></span>
+    </div>`;
+  }
+
+  function copyDebugId(id, el) {
+    if (!id) return;
+    navigator.clipboard.writeText(id).then(() => {
+      // Visual feedback: show "已复制" briefly
+      const span = el;
+      const orig = span.textContent;
+      span.textContent = "已复制 ✓";
+      span.style.color = "var(--green)";
+      setTimeout(() => {
+        span.textContent = orig;
+        span.style.color = "";
+      }, 1500);
+    }).catch(() => {
+      // Fallback for non-HTTPS or older browsers
+      const ta = document.createElement("textarea");
+      ta.value = id;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+      const orig = el.textContent;
+      el.textContent = "已复制 ✓";
+      el.style.color = "var(--green)";
+      setTimeout(() => { el.textContent = orig; el.style.color = ""; }, 1500);
+    });
+  }
+
+  // ── Markdown Rendering ──────────────────────────────────
+  (function initMarked() {
+    if (typeof marked !== 'undefined') {
+      marked.setOptions({
+        breaks: true,          // Convert \n to <br>
+        gfm: true,             // GitHub Flavored Markdown (tables, strikethrough, etc.)
+        silent: false,
+      });
+    }
+  })();
+
+  function renderMd(text) {
+    if (!text || typeof text !== 'string') return esc(String(text || ''));
+    try {
+      if (typeof marked !== 'undefined') {
+        const html = marked.parse(text);
+        return html;
+      }
+      // Fallback: basic auto-link and newline-to-br
+      let out = esc(text);
+      out = out.replace(/(https?:\/\/[^\s<>"]+)/g, '<a href="$1" target="_blank">$1</a>');
+      out = out.replace(/\n/g, '<br>');
+      return out;
+    } catch (e) {
+      return esc(text);
+    }
+  }
+
+  // Detect if content looks like markdown (has markdown syntax elements)
+  function looksLikeMarkdown(text) {
+    if (!text || typeof text !== 'string') return false;
+    const mdPatterns = [
+      /^#{1,6}\s+\S/m,            // headings
+      /\*\*.*?\*\*/,               // bold
+      /\*[^*\s].*?[^*\s]\*/,       // italic (exclude bullet points)
+      /\[.*?\]\(.*?\)/,            // links
+      /^>\s+/m,                    // blockquotes
+      /^\-{3,}$/m,                 // horizontal rules
+      /^\s*[-*+]\s+/m,             // unordered lists
+      /^\s*\d+\.\s+/m,             // ordered lists
+      /`[^`]+`/,                   // inline code
+      /```[\s\S]*?```/,            // code blocks
+      /^\|.*\|.*\|$/m,             // tables
+      /~~.*?~~/,                   // strikethrough
+      /^\[\^.*?\]:/m,              // footnotes
+    ];
+    return mdPatterns.some(p => p.test(text));
   }
 
   function formatTime(v) {
@@ -1244,7 +1708,7 @@
 
   function showAgentMessage(msg) {
     const time = new Date().toLocaleTimeString();
-    const bubble = `<div class="msg msg-system" style="margin:8px 0;"><div class="msg-header"><span class="dot purple"></span>AGENT<span class="msg-time">${time}</span></div><div class="msg-body" style="white-space:pre-wrap;">${esc(msg)}</div></div>`;
+    const bubble = `<div class="msg msg-system" style="margin:8px 0;"><div class="msg-header"><span class="dot purple"></span>AGENT<span class="msg-time">${time}</span></div><div class="msg-body" style="white-space:pre-wrap;"><div class="md-content">${renderMd(msg)}</div></div></div>`;
     if (!convEl.innerHTML || convEl.innerHTML.includes('empty-state')) convEl.innerHTML = bubble;
     else convEl.innerHTML += bubble;
     convEl.scrollTop = convEl.scrollHeight;
@@ -1412,15 +1876,30 @@
   }
   async function runWorkflow(wfId) {
     const sid = activeSessionId || ("session_" + Date.now());
-    const res = await fetch(`/api/workflows/${wfId}/run`, {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({session_id:sid})});
-    const data = await res.json();
-    document.getElementById("wfOverlay")?.remove();
-    document.getElementById("wfDetailOverlay")?.remove();
-    activeTaskId = data.task_id; activeSessionId = sid;
-    convEl.innerHTML = '<div class="waiting"><div class="spinner"></div><span style="color:var(--text-secondary);font-size:13px;">Running workflow...</span></div>';
-    await loadSessionEvents(sid, data.task_id);
-    await loadSessions();
-    startPoll(data.task_id);
+    try {
+      const res = await fetch(`/api/workflows/${encodeURIComponent(wfId)}/run`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_id: sid })
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || data.detail || `服务器错误 (${res.status})`);
+      }
+      if (!data.task_id) {
+        throw new Error("服务器返回了无效的任务ID");
+      }
+      document.getElementById("wfOverlay")?.remove();
+      document.getElementById("wfDetailOverlay")?.remove();
+      activeTaskId = data.task_id; activeSessionId = sid;
+      convEl.innerHTML = '<div class="waiting"><div class="spinner"></div><span style="color:var(--text-secondary);font-size:13px;">Running workflow...</span></div>';
+      await loadSessionEvents(sid, data.task_id);
+      await loadSessions();
+      startPoll(data.task_id);
+    } catch (err) {
+      console.error("runWorkflow failed:", err);
+      alert("运行工作流失败: " + err.message);
+    }
   }
 
   async function deleteWorkflow(wfId, wfName) {
@@ -1456,6 +1935,225 @@
   checkHealth();
   loadSessions();
   setInterval(checkHealth, 30000);
+
+  // ── Vent Mode (Agent Vent / Feedback) ─────────────────────
+
+  let ventSessionId = null;
+  let ventSelectedPhraseId = null;
+  let ventPhrasesGrouped = {};
+  let ventCurrentLang = "zh";
+
+  // Called before sending a message to detect frustration
+  async function detectFrustration(text, sessionId, taskId) {
+    try {
+      const res = await fetch("/api/vent/detect", {
+        method: "POST",
+        headers: { "Content-Type": "application/json; charset=utf-8" },
+        body: JSON.stringify({ input: text, session_id: sessionId || "default", task_id: taskId || "" })
+      });
+      if (!res.ok) return null;
+      return await res.json();
+    } catch (err) {
+      console.warn("Vent detect error:", err);
+      return null;
+    }
+  }
+
+  // Show the Vent Panel
+  async function showVentPanel(detectionResult) {
+    const overlay = document.getElementById("ventOverlay");
+    overlay.classList.remove("hidden");
+
+    // Set severity info
+    const sevLevel = detectionResult.severity_level || "light";
+    const badge = document.getElementById("ventBadge");
+    badge.textContent = sevLevel === "light" ? "轻度不满" : sevLevel === "medium" ? "中度愤怒" : "极度愤怒";
+    badge.className = "vent-severity-badge vent-severity-" + sevLevel;
+
+    const emoji = document.getElementById("ventEmoji");
+    emoji.textContent = sevLevel === "light" ? "😐" : sevLevel === "medium" ? "😤" : "🤬";
+
+    const title = document.getElementById("ventTitle");
+    title.textContent = sevLevel === "light" ? "不太满意？" : sevLevel === "medium" ? "发泄一下" : "我们听到了";
+
+    const subtitle = document.getElementById("ventSubtitle");
+    subtitle.textContent = sevLevel === "light"
+      ? "方便告诉我具体哪里出了问题吗？"
+      : sevLevel === "medium"
+        ? "选一条吐槽，或直接告诉我哪里不对——你的反馈会被认真对待"
+        : "我们已经暂停了当前任务。请告诉我们具体哪里出了问题";
+
+    // Reset state
+    ventSessionId = null;
+    ventSelectedPhraseId = null;
+    document.getElementById("ventFieldPain").value = "";
+    document.getElementById("ventFieldSuggestion").value = "";
+    document.getElementById("ventFieldPainHint").textContent = "";
+    document.getElementById("ventClosing").classList.add("hidden");
+    document.getElementById("ventClosing").textContent = "";
+    document.getElementById("btnVentSubmit").disabled = false;
+    document.getElementById("btnVentSubmit").textContent = "提交反馈";
+
+    // Start a vent session on the backend
+    try {
+      const sessionId = activeSessionId || "default";
+      const res = await fetch("/api/vent/session/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json; charset=utf-8" },
+        body: JSON.stringify({
+          session_id: sessionId,
+          task_id: activeTaskId || "",
+          severity: detectionResult.severity || 1,
+          pain_points: detectionResult.pain_points || []
+        })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        ventSessionId = data.id;
+
+        // Populate template fields
+        if (data.template) {
+          document.getElementById("ventFieldObjective").textContent =
+            data.template.task_objective || "（任务信息暂不可用）";
+          document.getElementById("ventFieldAction").textContent =
+            data.template.actual_action || "（上下文信息暂不可用）";
+        }
+
+        // Render phrase groups
+        if (data.phrases_grouped) {
+          ventPhrasesGrouped = data.phrases_grouped;
+          renderVentPhrases(data.phrases_grouped);
+        }
+      }
+    } catch (err) {
+      console.error("Vent session start error:", err);
+    }
+  }
+
+  function renderVentPhrases(groups) {
+    const container = document.getElementById("ventPhraseGroups");
+    const PAIN_LABELS = {
+      file_operation: "📁 文件操作",
+      intent_understanding: "🧠 理解偏差",
+      execution_quality: "⚡ 执行质量",
+      speed_performance: "🐢 响应速度",
+      repetition_loop: "🔁 重复循环",
+      permission_issue: "🔒 权限问题",
+      general: "💬 综合不满"
+    };
+
+    let html = "";
+    for (const [pd, phrases] of Object.entries(groups)) {
+      if (!phrases || !phrases.length) continue;
+      html += `<div class="vent-phrase-group">`;
+      html += `<div class="vent-phrase-group-title">${PAIN_LABELS[pd] || pd}</div>`;
+      html += `<div class="vent-phrase-list">`;
+      for (const p of phrases) {
+        html += `<button class="vent-phrase-chip" data-id="${escAttr(p.id)}" data-pd="${escAttr(pd)}" data-guide="${escAttr(p.guides_user_to || '')}" onclick="selectVentPhrase('${escAttr(p.id)}', '${escAttr(pd)}', this)">${esc(p.text)}</button>`;
+      }
+      html += `</div></div>`;
+    }
+    container.innerHTML = html || '<div style="font-size:11px;color:var(--text-muted);">暂无可用话术</div>';
+  }
+
+  function selectVentPhrase(id, painDir, el) {
+    // Toggle selection
+    const allChips = document.querySelectorAll(".vent-phrase-chip");
+    if (ventSelectedPhraseId === id) {
+      // Deselect
+      ventSelectedPhraseId = null;
+      allChips.forEach(c => c.classList.remove("selected"));
+      document.getElementById("ventFieldPainHint").textContent = "";
+    } else {
+      ventSelectedPhraseId = id;
+      allChips.forEach(c => c.classList.remove("selected"));
+      el.classList.add("selected");
+      // Show guide hint
+      const guide = el.dataset.guide || "";
+      if (guide) {
+        document.getElementById("ventFieldPainHint").textContent = "💡 " + guide;
+      }
+      // Focus the pain textarea
+      document.getElementById("ventFieldPain").focus();
+    }
+  }
+
+  function closeVentPanel() {
+    document.getElementById("ventOverlay").classList.add("hidden");
+    ventSessionId = null;
+    ventSelectedPhraseId = null;
+    // If the user was trying to send a message when vent was triggered,
+    // resume that task creation now that they've skipped.
+    if (ventPendingText) {
+      const text = ventPendingText;
+      ventPendingText = null;
+      inputEl.value = "";
+      _doCreateTask(text);
+    }
+  }
+
+  async function submitVent() {
+    if (!ventSessionId) return;
+
+    const btn = document.getElementById("btnVentSubmit");
+    btn.disabled = true;
+    btn.textContent = "提交中...";
+
+    const userPain = document.getElementById("ventFieldPain").value.trim();
+    const userSuggestion = document.getElementById("ventFieldSuggestion").value.trim();
+
+    try {
+      const res = await fetch(`/api/vent/session/${ventSessionId}/submit`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json; charset=utf-8" },
+        body: JSON.stringify({
+          user_pain_point: userPain,
+          user_suggestion: userSuggestion,
+          selected_phrase_id: ventSelectedPhraseId || ""
+        })
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+
+        // Show closing message
+        const closing = document.getElementById("ventClosing");
+        closing.classList.remove("hidden");
+        closing.textContent = data.closing_message || "反馈已提交，感谢你的意见！";
+
+        btn.textContent = "已提交 ✓";
+        btn.style.background = "var(--green-dim)";
+
+        // Auto-close after 3 seconds, then resume pending task if any
+        setTimeout(() => {
+          closeVentPanelAndResume();
+          btn.disabled = false;
+          btn.textContent = "提交反馈";
+          btn.style.background = "var(--accent-dim)";
+        }, 3000);
+      } else {
+        btn.disabled = false;
+        btn.textContent = "提交失败，重试";
+        console.error("Vent submit failed:", res.status);
+      }
+    } catch (err) {
+      btn.disabled = false;
+      btn.textContent = "提交失败，重试";
+      console.error("Vent submit error:", err);
+    }
+  }
+
+  function closeVentPanelAndResume() {
+    document.getElementById("ventOverlay").classList.add("hidden");
+    ventSessionId = null;
+    ventSelectedPhraseId = null;
+    if (ventPendingText) {
+      const text = ventPendingText;
+      ventPendingText = null;
+      inputEl.value = "";
+      _doCreateTask(text);
+    }
+  }
 
   // ── File Upload ──────────────────────────────────────────
   let uploadedFiles = []; // [{filename, saved_path, content_type, size, size_human}]

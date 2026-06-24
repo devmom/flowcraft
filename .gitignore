@@ -57,6 +57,9 @@ data/
 htmlcov/
 coverage.xml
 
+# ── MCP config (may contain API keys) ──
+.mcp.json
+
 # ── Project-specific temp files ──
 tmp-*
 *_bak*

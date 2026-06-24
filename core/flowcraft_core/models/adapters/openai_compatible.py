@@ -140,6 +140,12 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             parsed = self._parse_json(raw)
             if parsed is not None:
                 return parsed
+            # Log parse failure details for diagnosis
+            raw_preview = raw[:200] + ("...[truncated]" if len(raw) > 200 else "")
+            logger.warning(
+                "structured_chat attempt %d/3: JSON parse failed. raw_len=%d, preview=%s",
+                attempt + 1, len(raw), raw_preview,
+            )
             if attempt < 2:
                 augmented.append({
                     "role": "user",
@@ -166,10 +172,14 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             "model": self.profile.model_id,
             "messages": messages,
             "temperature": kwargs.get("temperature", 0.7),
-            "max_tokens": kwargs.get("max_tokens", 4096),
+            "max_tokens": kwargs.get("max_tokens", 384000),  # DeepSeek V4 Pro: 384,000 max output
         }
-        # thinking is only supported by reasoner models (deepseek-v4-pro, deepseek-chat)
-        # deepseek-v4-flash and other non-reasoner models will error if this is included
+        # Thinking mode (deepseek-v4-pro, deepseek-chat, deepseek-reasoner)
+        # Supports: {"type": "disabled"} | {"type": "high"} | {"type": "max"}
+        # 'disabled' = no reasoning tokens, fastest/cheapest (default)
+        # 'high' = moderate reasoning depth, better for complex tasks
+        # 'max' = maximum reasoning depth, best quality but slowest/most expensive
+        # deepseek-v4-flash does NOT support thinking — excluding it below
         model = self.profile.model_id
         if model in ("deepseek-v4-pro", "deepseek-chat", "deepseek-reasoner"):
             thinking = kwargs.get("thinking", {"type": "disabled"})
@@ -265,13 +275,24 @@ class OpenAICompatibleAdapter(ProviderAdapter):
 
     @staticmethod
     def _parse_json(raw: str) -> dict | None:
-        """从模型输出中提取 JSON，支持 code fence 包裹和无包裹."""
+        """从模型输出中提取 JSON，支持 code fence 包裹和无包裹.
+
+        增加诊断：检查是否因 max_tokens 截断导致 JSON 不完整.
+        """
         text = raw.strip()
         # Direct parse
         try:
             return json.loads(text)
-        except json.JSONDecodeError:
-            pass
+        except json.JSONDecodeError as e:
+            # Check for truncation (incomplete JSON is the most common cause)
+            if len(text) > 50:
+                text_end = text[-50:]
+                if text.rstrip().count('{') > text.rstrip().count('}'):
+                    logger.warning(
+                        "JSON parse error (likely truncated by max_tokens): %s. "
+                        "text_len=%d, ends_with=%s",
+                        e, len(text), text_end
+                    )
         # Remove code fences
         if text.startswith("```"):
             lines = text.split("\n")

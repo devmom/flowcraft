@@ -399,10 +399,10 @@ class Handler(BaseHTTPRequestHandler):
         # ── Workflow Builder ────────────────────────
         if parsed.path == "/api/workflows/build/start":
             body = self._body()
-            result = app.workflow_builder.start(
+            result = asyncio.run(app.workflow_builder.start(
                 user_input=body.get("input", ""),
                 session_id=body.get("session_id"),
-            )
+            ))
             self._json(result)
             return
 
@@ -615,30 +615,52 @@ class Handler(BaseHTTPRequestHandler):
             return
         # ── Workflow Run ─────────────────────────
         if parsed.path.startswith("/api/workflows/") and parsed.path.endswith("/run"):
-            wf_id = parsed.path.split("/")[3]
-            wf_row = app.db.fetch_one("SELECT * FROM workflow_templates WHERE id = ?", (wf_id,))
-            if not wf_row:
-                self._json({"detail": "Workflow not found"}, status=404)
-                return
-            wf = dict(wf_row)
-            # Parse steps from data_json (single JSON blob column)
-            data_blob = _json.loads(wf.get("data_json", "{}"))
-            steps = data_blob.get("steps", [])
-            if not steps:
-                self._json({"detail": "Workflow has no steps"}, status=400)
-                return
-            # Increment use_count
-            app.db.execute(
-                "UPDATE workflow_templates SET updated_at = ? WHERE id = ?",
-                (_now_utc(), wf_id))
-            # Run workflow as a task
-            prompt = f"执行工作流: {wf['name']}\n描述: {wf.get('description','')}\n步骤: {_json.dumps(steps, ensure_ascii=False)}"
-            request = AgentRequest(
-                session_id=body.get("session_id", "default"),
-                raw_input=prompt,
-            )
-            task = asyncio.run(app.runtime.create_task_async(request))
-            self._json({"workflow_id": wf_id, "task_id": task.task_id, "status": "started"})
+            body = self._body()
+            wf_id = ""
+            try:
+                wf_id = parsed.path.split("/")[3]
+                wf_row = app.db.fetch_one("SELECT * FROM workflow_templates WHERE id = ?", (wf_id,))
+                if not wf_row:
+                    self._json({"detail": "Workflow not found"}, status=404)
+                    return
+                wf = dict(wf_row)
+                # Parse steps from data_json (single JSON blob column)
+                data_blob = json.loads(wf.get("data_json", "{}"))
+                steps = data_blob.get("steps", [])
+                if not steps:
+                    self._json({"detail": "Workflow has no steps"}, status=400)
+                    return
+                # Increment use_count
+                app.db.execute(
+                    "UPDATE workflow_templates SET updated_at = ? WHERE id = ?",
+                    (_now_utc(), wf_id))
+                # Reset shared httpx client before asyncio.run() — avoids stale
+                # event-loop binding when ThreadingHTTPServer reuses threads.
+                try:
+                    import flowcraft_core.tools.network as _net
+                    _net._client = None
+                except Exception:
+                    pass
+                # Run workflow as a task (creates new event loop per request)
+                prompt = f"执行工作流: {wf['name']}\n描述: {wf.get('description','')}\n步骤: {json.dumps(steps, ensure_ascii=False)}"
+                request = AgentRequest(
+                    session_id=body.get("session_id", "default"),
+                    raw_input=prompt,
+                )
+                task = asyncio.run(app.runtime.create_task_async(request))
+                self._json({"workflow_id": wf_id, "task_id": task.task_id, "status": "started"})
+            except asyncio.TimeoutError:
+                logging.exception("Workflow run timeout: %s", wf_id)
+                try:
+                    self._json({"error": "运行工作流超时（LLM响应太慢），请稍后重试", "task_id": None, "status": "FAILED"}, status=500)
+                except Exception:
+                    pass
+            except Exception as exc:
+                logging.exception("Workflow run failed: %s", exc)
+                try:
+                    self._json({"error": f"运行工作流失败: {exc}", "task_id": None, "status": "FAILED"}, status=500)
+                except Exception:
+                    pass
             return
 
         if parsed.path == "/api/settings":

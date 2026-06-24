@@ -37,6 +37,7 @@ class WorkflowTemplate:
     required_tools: list[str] = field(default_factory=list)
     required_permissions: list[str] = field(default_factory=list)
     risk_summary: str = "LOW"
+    environment_setup: dict[str, Any] = field(default_factory=dict)
     tags: list[str] = field(default_factory=list)
     use_count: int = 0
     status: str = "active"
@@ -56,6 +57,7 @@ class WorkflowTemplate:
             "required_tools": self.required_tools,
             "required_permissions": self.required_permissions,
             "risk_summary": self.risk_summary,
+            "environment_setup": self.environment_setup,
             "tags": self.tags,
             "use_count": self.use_count,
             "status": self.status,

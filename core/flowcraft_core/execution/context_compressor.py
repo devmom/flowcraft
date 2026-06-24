@@ -14,10 +14,9 @@ Strategy:
     └─────────────────────────────────────────────────────────┘
 
 Budget:
-    Max context budget: 8000 chars (safe for most models)
-    Recent layer: up to 4000 chars
-    Middle layer: up to 1500 chars
-    Summary layer: up to 2500 chars
+    Dynamic — derived from model's context_window × 80%.
+    DeepSeek V4 Pro (1M ctx) → ~800K tokens → ~2M chars budget
+    Fallback when model unknown: 32,000 chars
 """
 
 from __future__ import annotations
@@ -31,11 +30,10 @@ from flowcraft_core.domain.schemas import ToolObservation
 
 logger = logging.getLogger(__name__)
 
-# Context budget limits
-MAX_CONTEXT_CHARS = 8000
-MAX_RECENT_DETAIL_CHARS = 4000
-MAX_MIDDLE_CHARS = 1500
-MAX_OBSERVATION_DETAIL = 2000  # per-observation detail cap
+# Per-layer defaults — these are floors, actual budget scales with model
+MIN_CONTEXT_CHARS = 8000          # absolute minimum for any model
+FALLBACK_CONTEXT_CHARS = 32000    # used when model info unavailable
+MAX_OBSERVATION_DETAIL = 2000     # per-observation detail cap (unchanged)
 
 
 @dataclass
@@ -49,11 +47,30 @@ class CompressedContext:
 
 
 class ContextCompressor:
-    """Compresses multi-turn agent context to fit within model context window."""
+    """Compresses multi-turn agent context to fit within model context window.
 
-    def __init__(self, max_chars: int = MAX_CONTEXT_CHARS) -> None:
-        self.max_chars = max_chars
+    Budget is auto-detected from the model gateway when available.
+    Layers are allocated as ratios of the total budget:
+
+        Recent (last 2-3 observations): up to 50% of budget
+        Middle (4-5 back): up to 20% of budget
+        Summary (older + step history): up to 30% of budget
+    """
+
+    def __init__(self, max_chars: int | None = None, model_gateway: Any | None = None) -> None:
+        self.max_chars = max_chars or self._resolve_budget(model_gateway)
         self._step_summaries: dict[str, list[str]] = {}  # task_id -> list of step summaries
+
+    @staticmethod
+    def _resolve_budget(model_gateway: Any | None) -> int:
+        """Resolve context budget from model gateway, with fallback."""
+        if model_gateway is None:
+            return FALLBACK_CONTEXT_CHARS
+        try:
+            from flowcraft_core.memory.context_summarizer import get_context_budget
+            return get_context_budget(model_gateway)
+        except Exception:
+            return FALLBACK_CONTEXT_CHARS
 
     def compress(
         self,
@@ -162,8 +179,8 @@ class ContextCompressor:
         """Add a completed step's output to the progressive summary."""
         if task_id not in self._step_summaries:
             self._step_summaries[task_id] = []
-        # Keep a short summary of each step
-        summary = step_output[:300].replace("\n", " ").strip()
+        # 保留完整步骤输出，不做硬截断。由 smart_truncate 在预算溢出时智能压缩。
+        summary = step_output.replace("\n", " ").strip()
         if summary:
             self._step_summaries[task_id].append(summary)
         # Keep only last 10 step summaries

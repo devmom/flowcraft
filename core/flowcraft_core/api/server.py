@@ -49,6 +49,7 @@ class SettingValueRequest(BaseModel):
 async def lifespan(app: FastAPI):
     settings = load_settings()
     app.state.flowcraft = FlowCraftApp(settings)
+    await app.state.flowcraft.startup()
     yield
 
 
@@ -106,6 +107,31 @@ def create_app() -> FastAPI:
             task_dict["task_id"] = task_dict["id"]
         context = flowcraft.memory.get_task_context(task_id)
         return {"task": task_dict, "brief": context.get("brief"), "current_plan": context.get("plan"), "current_step": context.get("steps", [None])[0] if context.get("steps") else None}
+
+    @app.get("/api/tasks/{task_id}/model-stats")
+    async def get_task_model_stats(task_id: str):
+        """Return aggregated token/cost stats for a task from model_calls table."""
+        flowcraft: FlowCraftApp = app.state.flowcraft
+        try:
+            rows = flowcraft.db.fetch_all(
+                "SELECT prompt_tokens, completion_tokens, cost_estimate "
+                "FROM model_calls WHERE task_id = ?",
+                (task_id,)
+            )
+        except Exception:
+            return {"task_id": task_id, "total_tokens": 0, "total_cost": 0.0, "call_count": 0}
+
+        total_prompt = sum(r["prompt_tokens"] or 0 for r in rows)
+        total_completion = sum(r["completion_tokens"] or 0 for r in rows)
+        total_cost = sum(r["cost_estimate"] or 0.0 for r in rows)
+        return {
+            "task_id": task_id,
+            "prompt_tokens": total_prompt,
+            "completion_tokens": total_completion,
+            "total_tokens": total_prompt + total_completion,
+            "total_cost": round(total_cost, 6),
+            "call_count": len(rows),
+        }
 
     @app.get("/api/tasks/{task_id}/events")
     async def get_task_events(
@@ -551,6 +577,66 @@ def create_app() -> FastAPI:
             })
             return {"workflow_id": workflow_id, "status": "soft_deleted"}
 
+    # ── Workflow Import/Export (Phase 2) ──────────────────────
+
+    @app.get("/api/workflows/{workflow_id}/export")
+    async def export_workflow(workflow_id: str):
+        """Export a workflow as a downloadable JSON file."""
+        flowcraft: FlowCraftApp = app.state.flowcraft
+        row = flowcraft.db.fetch_one(
+            "SELECT * FROM workflow_templates WHERE id = ?", (workflow_id,))
+        if not row:
+            raise HTTPException(status_code=404, detail="Workflow not found")
+        wf = dict(row)
+        export_data = {
+            "flowcraft_workflow_version": "1.0",
+            "exported_at": datetime.now(timezone.utc).isoformat(),
+            "workflow": {
+                "name": wf.get("name", ""),
+                "description": wf.get("description", ""),
+                "risk_summary": wf.get("risk_summary", "LOW"),
+                "required_tools": json.loads(wf.get("required_tools_json", "[]")),
+                "required_permissions": json.loads(wf.get("required_permissions_json", "[]")),
+                "input_schema": json.loads(wf.get("input_schema_json", "{}")),
+                "output_schema": json.loads(wf.get("output_schema_json", "{}")),
+                "steps": json.loads(wf.get("steps_json", "[]")),
+            },
+        }
+        return export_data
+
+    @app.post("/api/workflows/import")
+    async def import_workflow(payload: dict[str, Any]):
+        """Import a workflow from JSON data."""
+        flowcraft: FlowCraftApp = app.state.flowcraft
+        wf_data = payload.get("workflow", {})
+        if not wf_data or not wf_data.get("name"):
+            raise HTTPException(status_code=400, detail="Invalid workflow data: 'name' required")
+
+        import uuid
+        wf_id = f"wf_{uuid.uuid4().hex[:12]}"
+        now = datetime.now(timezone.utc).isoformat()
+
+        flowcraft.db.execute(
+            """INSERT INTO workflow_templates (id, name, description, risk_summary,
+            required_tools_json, required_permissions_json, input_schema_json,
+            output_schema_json, steps_json, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)""",
+            (
+                wf_id,
+                wf_data.get("name", "Imported Workflow"),
+                wf_data.get("description", ""),
+                wf_data.get("risk_summary", "LOW"),
+                json.dumps(wf_data.get("required_tools", []), ensure_ascii=False),
+                json.dumps(wf_data.get("required_permissions", []), ensure_ascii=False),
+                json.dumps(wf_data.get("input_schema", {}), ensure_ascii=False),
+                json.dumps(wf_data.get("output_schema", {}), ensure_ascii=False),
+                json.dumps(wf_data.get("steps", []), ensure_ascii=False),
+                now, now,
+            ),
+        )
+        logger.info("Workflow imported: %s (id=%s)", wf_data.get("name"), wf_id)
+        return {"workflow_id": wf_id, "name": wf_data.get("name"), "status": "imported"}
+
     # ── Workflow Builder ──────────────────────────────────────
 
     @app.post("/api/workflows/build/start")
@@ -563,7 +649,7 @@ def create_app() -> FastAPI:
           Response: { "session_id": "...", "stage": "...", "agent_message": "...", ... }
         """
         flowcraft: FlowCraftApp = app.state.flowcraft
-        result = flowcraft.workflow_builder.start(
+        result = await flowcraft.workflow_builder.start(
             user_input=payload.get("input", ""),
             session_id=payload.get("session_id"),
         )
@@ -624,6 +710,7 @@ def create_app() -> FastAPI:
             "required_tools": wf.get("required_tools", []),
             "required_permissions": wf.get("required_permissions", []),
             "risk_summary": wf.get("risk_summary", "LOW"),
+            "environment_setup": wf.get("environment_setup", {}),
             "input_schema": wf.get("input_schema", {}),
             "output_schema": wf.get("output_schema", {}),
             "tags": wf.get("tags", []),
@@ -712,6 +799,82 @@ def create_app() -> FastAPI:
         from flowcraft_core.config.sync import WorkflowMarketplace
         mp = WorkflowMarketplace(flowcraft.db, flowcraft.settings.data_dir)
         return mp.publish(workflow_id)
+
+    @app.post("/api/workflows/{workflow_id}/run")
+    async def run_workflow(workflow_id: str, payload: dict[str, Any]):
+        """Execute a saved workflow by creating a task.
+
+        Frontend calls: POST /api/workflows/{id}/run {"session_id": "..."}
+        Response: { "task_id": "...", "status": "CREATED", "title": "..." }
+        """
+        flowcraft: FlowCraftApp = app.state.flowcraft
+
+        row = flowcraft.db.fetch_one(
+            "SELECT * FROM workflow_templates WHERE id = ?",
+            (workflow_id,),
+        )
+        if not row:
+            raise HTTPException(404, "Workflow not found")
+
+        wf = dict(row)
+        name = wf.get("name", "Untitled") or "Untitled"
+        description = wf.get("description", "") or ""
+
+        # Parse data_json to get steps; schema: {"steps": [...], "required_tools": [...], ...}
+        steps: list[dict] = []
+        try:
+            data_blob = json.loads(wf.get("data_json", "{}") or "{}")
+            steps = data_blob.get("steps", [])
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        # Build a clear instruction for the Agent
+        step_lines = []
+        for s in sorted(steps, key=lambda x: x.get("index", 0)):
+            title = s.get("title", "Step")
+            objective = s.get("objective", "")
+            action = s.get("action_type", "")
+            tool = s.get("tool_name", "")
+            step_lines.append(
+                f"- 步骤{s.get('index', '?')}. {title}"
+                f" [类型: {action}]" + (f" [工具: {tool}]" if tool else "") +
+                f": {objective}"
+            )
+
+        if step_lines:
+            input_text = (
+                f"执行工作流「{name}」\n\n"
+                f"描述: {description}\n\n"
+                f"执行以下步骤:\n" + "\n".join(step_lines) +
+                "\n\n请按顺序执行以上步骤，每步完成后汇报结果。"
+            )
+        else:
+            # Fallback: use name/description as the task
+            input_text = f"执行工作流「{name}」\n\n{description or '执行该工作流的所有步骤。'}"
+
+        from uuid import uuid4
+        session_id = payload.get("session_id", f"session_{uuid4().hex[:12]}")
+        request = AgentRequest(
+            session_id=session_id,
+            raw_input=input_text,
+        )
+        task = await flowcraft.runtime.start_task(request)
+
+        # Update workflow usage count
+        try:
+            current_count = wf.get("use_count", 0)
+            flowcraft.db.update("workflow_templates", "id", workflow_id, {
+                "use_count": current_count + 1,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            })
+        except Exception:
+            pass
+
+        return CreateTaskResponse(
+            task_id=task.task_id,
+            status=task.status.value,
+            title=f"运行: {name}",
+        )
 
     @app.post("/api/workflows/{workflow_id}/unpublish")
     async def unpublish_workflow(workflow_id: str):
@@ -861,6 +1024,360 @@ def create_app() -> FastAPI:
             all_events.extend(flowcraft.events.list_for_task(dict(row)["id"]))
         all_events.sort(key=lambda e: e.get("created_at", ""))
         return {"events": all_events, "session_id": session_id}
+
+    # ── Vent Mode (Agent Vent / Feedback) ────────────────────
+
+    class VentDetectRequest(BaseModel):
+        input: str
+        session_id: str = "default"
+        task_id: str = ""
+
+    class VentStartRequest(BaseModel):
+        session_id: str = "default"
+        task_id: str = ""
+        severity: int = 1
+        pain_points: list[str] = Field(default_factory=list)
+
+    class VentSubmitRequest(BaseModel):
+        user_pain_point: str = ""
+        user_suggestion: str = ""
+        selected_phrase_id: str = ""
+
+    class VentPhraseVoteRequest(BaseModel):
+        phrase_id: str
+
+    class VentCustomPhraseRequest(BaseModel):
+        text: str = Field(min_length=1, max_length=200)
+        lang: str = "zh"
+        pain_direction: str = "general"
+
+    @app.post("/api/vent/detect")
+    async def vent_detect(payload: VentDetectRequest):
+        """Detect user frustration in a message.
+
+        Returns FrustrationAssessment with severity, target, and pain_points.
+        Frontend calls this on every user message to decide whether to show Vent Panel.
+        """
+        flowcraft: FlowCraftApp = app.state.flowcraft
+        if not flowcraft.frustration_detector:
+            raise HTTPException(501, "Vent module not initialized")
+        assessment = flowcraft.frustration_detector.detect(
+            payload.input, session_id=payload.session_id, task_id=payload.task_id,
+        )
+        return {
+            "is_frustrated": assessment.is_frustrated,
+            "severity": assessment.severity,
+            "target": assessment.target,
+            "pain_points": assessment.pain_points,
+            "confidence": assessment.confidence,
+            "detection_method": assessment.detection_method,
+            "should_trigger_vent": assessment.should_trigger_vent(),
+            "severity_level": assessment.vent_severity_level(),
+        }
+
+    class VentRefineRequest(BaseModel):
+        input: str
+        session_id: str = "default"
+        severity: int = 1
+        pain_points: list[str] = Field(default_factory=list)
+        target: str = "agent"
+
+    @app.post("/api/vent/detect/refine")
+    async def vent_detect_refine(payload: VentRefineRequest):
+        """Deferred LLM refinement of frustration detection (Filter 3).
+
+        Called only when user interacts with Vent Panel (selects phrase or
+        fills template). Uses ~200 tokens — much cheaper than calling on
+        every message.
+        """
+        flowcraft: FlowCraftApp = app.state.flowcraft
+        if not flowcraft.frustration_detector:
+            raise HTTPException(501, "Vent module not initialized")
+
+        # Reconstruct the keyword assessment
+        from flowcraft_core.feedback.sentiment import FrustrationAssessment
+        assessment = FrustrationAssessment(
+            is_frustrated=True,
+            severity=payload.severity,
+            target=payload.target,
+            pain_points=payload.pain_points,
+            original_input=payload.input,
+            confidence=0.75,
+            detection_method="keyword",
+            filter_level=2,
+        )
+
+        refined = await flowcraft.frustration_detector.refine_with_llm(assessment)
+        return {
+            "is_frustrated": refined.is_frustrated,
+            "severity": refined.severity,
+            "target": refined.target,
+            "pain_points": refined.pain_points,
+            "confidence": refined.confidence,
+            "detection_method": refined.detection_method,
+            "filter_level": refined.filter_level,
+            "was_refined": refined.detection_method == "llm",
+        }
+
+    @app.post("/api/vent/session/start")
+    async def vent_session_start(payload: VentStartRequest):
+        """Start a new vent session.
+
+        Generates a context-aware template (with auto-filled fields from task trace
+        when available) and returns top phrases for the user to choose from.
+        """
+        flowcraft: FlowCraftApp = app.state.flowcraft
+        if not flowcraft.vent_session_manager or not flowcraft.phrase_library:
+            raise HTTPException(501, "Vent module not initialized")
+
+        # Create vent session
+        vent = flowcraft.vent_session_manager.start_session(
+            session_id=payload.session_id,
+            severity=payload.severity,
+            task_id=payload.task_id,
+            pain_points=payload.pain_points,
+        )
+
+        # Try to pre-fill template from task trace (Phase 2: full trace extraction)
+        task_objective = ""
+        actual_action = ""
+        consequence = ""
+        if payload.task_id:
+            try:
+                task_row = flowcraft.db.fetch_one(
+                    "SELECT * FROM tasks WHERE id = ?", (payload.task_id,))
+                task_row_dict = dict(task_row) if task_row else None
+                events = flowcraft.events.list_for_task(payload.task_id)
+                task_objective, actual_action, consequence = (
+                    flowcraft.vent_session_manager.extract_context_from_traces(
+                        events, task_row_dict,
+                    )
+                )
+            except Exception:
+                pass
+
+        flowcraft.vent_session_manager.build_template(
+            vent.id,
+            task_objective=task_objective,
+            actual_action=actual_action,
+            consequence=consequence,
+        )
+
+        # Get phrases grouped by pain_direction
+        phrases_grouped = flowcraft.phrase_library.get_phrases_grouped(lang="zh")
+        top_phrases = flowcraft.phrase_library.get_top_phrases(lang="zh", limit=10)
+
+        # Format phrases for API response
+        phrases_dict = {pd: [p.to_dict() for p in phrases]
+                        for pd, phrases in phrases_grouped.items()}
+        top_dict = [p.to_dict() for p in top_phrases]
+
+        return vent.to_api_response(
+            top_phrases=top_dict,
+            phrases_grouped=phrases_dict,
+        )
+
+    @app.post("/api/vent/session/{vent_id}/submit")
+    async def vent_session_submit(vent_id: str, payload: VentSubmitRequest):
+        """Submit user's vent feedback.
+
+        Processes feedback through InsightMapper, generates correction hints,
+        integrates into memory system, and closes the vent session.
+        """
+        flowcraft: FlowCraftApp = app.state.flowcraft
+        if not flowcraft.vent_session_manager:
+            raise HTTPException(501, "Vent module not initialized")
+
+        session = flowcraft.vent_session_manager.submit_feedback(
+            vent_id,
+            user_pain_point=payload.user_pain_point,
+            user_suggestion=payload.user_suggestion,
+            selected_phrase_id=payload.selected_phrase_id,
+        )
+        if not session:
+            raise HTTPException(404, "Vent session not found")
+
+        # Vote for selected phrase
+        if payload.selected_phrase_id and flowcraft.phrase_library:
+            flowcraft.phrase_library.vote(payload.selected_phrase_id)
+
+        # Map to insight (Phase 2: LLM-enhanced)
+        if flowcraft.insight_mapper:
+            # Determine pain directions: from session pain_points + phrase's pain_direction
+            pain_dirs = list(session.pain_points) if session.pain_points else []
+            if payload.selected_phrase_id and flowcraft.phrase_library:
+                phrase = flowcraft.phrase_library.get_phrase(payload.selected_phrase_id)
+                if phrase and phrase.pain_direction not in pain_dirs:
+                    pain_dirs.append(phrase.pain_direction)
+
+            # Phase 2: LLM-based insight analysis when user provides detailed complaint
+            if payload.user_pain_point and len(payload.user_pain_point) > 10:
+                insight = await flowcraft.insight_mapper.map_with_llm(
+                    user_complaint=payload.user_pain_point,
+                    pain_points=pain_dirs,
+                    task_objective=session.template.task_objective if session.template else "",
+                    severity=session.severity,
+                )
+            else:
+                insight = flowcraft.insight_mapper.map_from_pain_points(
+                    pain_dirs, severity=session.severity,
+                )
+
+            # Integrate into memory (Phase 2: LLM condensation)
+            if flowcraft.feedback_memory_integrator:
+                tools_involved = []
+                task_type = ""
+                try:
+                    task_row = flowcraft.db.fetch_one(
+                        "SELECT task_type FROM tasks WHERE id = ?", (session.task_id,))
+                    task_type = task_row["task_type"] if task_row else ""
+                except Exception:
+                    pass
+
+                # Use async condensation when complaint is detailed
+                if payload.user_pain_point and len(payload.user_pain_point) > 10:
+                    await flowcraft.feedback_memory_integrator.integrate_with_condensation(
+                        vent_session_id=vent_id,
+                        failure_type=insight.failure_type.value,
+                        pain_direction=pain_dirs[0] if pain_dirs else "general",
+                        task_type=task_type,
+                        severity=session.severity,
+                        tools_involved=tools_involved,
+                        pain_point_text=payload.user_pain_point,
+                        correction_hint=insight.correction_hint,
+                        task_objective=session.template.task_objective if session.template else "",
+                    )
+                else:
+                    flowcraft.feedback_memory_integrator.integrate(
+                        vent_session_id=vent_id,
+                        failure_type=insight.failure_type.value,
+                        pain_direction=pain_dirs[0] if pain_dirs else "general",
+                        task_type=task_type,
+                        severity=session.severity,
+                        tools_involved=tools_involved,
+                        pain_point_text=payload.user_pain_point,
+                        correction_hint=insight.correction_hint,
+                    )
+
+            # Close session with insight
+            flowcraft.vent_session_manager.close_session(
+                vent_id,
+                insight_generated=insight.correction_hint,
+                mapped_failure_type=insight.failure_type.value,
+            )
+
+        # Record cooldown
+        if flowcraft.frustration_detector:
+            flowcraft.frustration_detector.record_vent_occurred(session.session_id)
+
+        # Record event
+        flowcraft.events.record(
+            TraceEvent(
+                task_id=session.task_id or "",
+                session_id=session.session_id,
+                event_type="VENT_COMPLETED",
+                title="用户提交了Vent反馈",
+                message=f"用户反馈: {payload.user_pain_point or '(话术选择)'}",
+                payload={
+                    "vent_session_id": vent_id,
+                    "severity": session.severity,
+                    "selected_phrase_id": payload.selected_phrase_id,
+                    "user_suggestion": payload.user_suggestion,
+                },
+                severity="INFO",
+            )
+        )
+
+        # Build closing message
+        closing_msg = ""
+        if flowcraft.agent_response_sanitizer:
+            closing_msg = flowcraft.agent_response_sanitizer.build_closing(
+                f"问题类型: {insight.failure_type.value if flowcraft.insight_mapper else '已记录'}"
+            )
+
+        return {
+            "status": "submitted",
+            "vent_id": vent_id,
+            "closing_message": closing_msg,
+            "insight": insight.to_dict() if (flowcraft.insight_mapper and 'insight' in dir()) else None,
+        }
+
+    @app.get("/api/vent/phrases")
+    async def vent_list_phrases(lang: str = Query("zh")):
+        """List all active vent phrases, grouped by pain_direction."""
+        flowcraft: FlowCraftApp = app.state.flowcraft
+        if not flowcraft.phrase_library:
+            raise HTTPException(501, "Vent module not initialized")
+        phrases = flowcraft.phrase_library.list_all_phrases(lang=lang)
+        phrases_grouped = flowcraft.phrase_library.get_phrases_grouped(lang=lang)
+        return {
+            "phrases": [p.to_dict() for p in phrases],
+            "groups": {pd: [p.to_dict() for p in phrases]
+                       for pd, phrases in phrases_grouped.items()},
+        }
+
+    @app.post("/api/vent/phrase/vote")
+    async def vent_phrase_vote(payload: VentPhraseVoteRequest):
+        """Vote for a vent phrase (increments local vote count)."""
+        flowcraft: FlowCraftApp = app.state.flowcraft
+        if not flowcraft.phrase_library:
+            raise HTTPException(501, "Vent module not initialized")
+        phrase = flowcraft.phrase_library.vote(payload.phrase_id)
+        if not phrase:
+            raise HTTPException(404, "Phrase not found")
+        return {"status": "voted", "phrase": phrase.to_dict()}
+
+    @app.post("/api/vent/phrase/custom")
+    async def vent_phrase_custom(payload: VentCustomPhraseRequest):
+        """Add a custom vent phrase."""
+        flowcraft: FlowCraftApp = app.state.flowcraft
+        if not flowcraft.phrase_library:
+            raise HTTPException(501, "Vent module not initialized")
+        phrase = flowcraft.phrase_library.add_custom_phrase(
+            text=payload.text,
+            lang=payload.lang,
+            pain_direction=payload.pain_direction,
+        )
+        return {"status": "created", "phrase": phrase.to_dict()}
+
+    @app.get("/api/vent/insights")
+    async def vent_insights(limit: int = Query(20, ge=1, le=100)):
+        """Get accumulated pain point analytics."""
+        flowcraft: FlowCraftApp = app.state.flowcraft
+        rows = flowcraft.db.fetch_all(
+            "SELECT * FROM pain_point_analytics ORDER BY occurrence_count DESC LIMIT ?",
+            (limit,))
+        return {"insights": [dict(r) for r in rows]}
+
+    @app.get("/api/vent/sessions/{vent_id}")
+    async def vent_get_session(vent_id: str):
+        """Get a vent session by ID."""
+        flowcraft: FlowCraftApp = app.state.flowcraft
+        if not flowcraft.vent_session_manager:
+            raise HTTPException(501, "Vent module not initialized")
+        session = flowcraft.vent_session_manager.get_session(vent_id)
+        if not session:
+            raise HTTPException(404, "Vent session not found")
+        return session.to_dict()
+
+    @app.get("/api/vent/lessons")
+    async def vent_list_lessons(
+        task_type: str = Query(""),
+        failure_type: str = Query(""),
+        pain_direction: str = Query(""),
+        limit: int = Query(5, ge=1, le=20),
+    ):
+        """Retrieve learned lessons from feedback memory."""
+        flowcraft: FlowCraftApp = app.state.flowcraft
+        if not flowcraft.feedback_memory_integrator:
+            raise HTTPException(501, "Vent module not initialized")
+        lessons = flowcraft.feedback_memory_integrator.retrieve_lessons(
+            task_type=task_type,
+            failure_type=failure_type,
+            pain_direction=pain_direction,
+            limit=limit,
+        )
+        return {"lessons": [l.to_dict() for l in lessons]}
 
     return app
 

@@ -61,6 +61,7 @@ class TaskBrief(BaseModel):
     clarification_questions: list[str] = Field(default_factory=list)
     success_criteria: list[str] = Field(default_factory=list)
     expected_output_format: str = "text"
+    thinking_mode: str = "disabled"  # "disabled" | "high" | "max" — DeepSeek V4 reasoning depth
 
 
 class PlanStep(BaseModel):
@@ -81,6 +82,12 @@ class PlanStep(BaseModel):
     max_retries: int = 2
     completion_check: dict[str, Any] = Field(default_factory=dict)
     failure_strategy: dict[str, Any] = Field(default_factory=dict)
+    thinking_mode: str | None = None  # None=inherit from task; "disabled"|"high"|"max"
+
+    # Phase 1-2: Skill & execution mode fields
+    execution_mode: str = "tool"  # "tool" | "skill" | "dynamic_script" | "model_answer"
+    skill_name: str | None = None  # qualified skill name when execution_mode="skill"
+    skill_params: dict[str, Any] = Field(default_factory=dict)  # params for skill script
 
 
 class ExecutionPlan(BaseModel):

@@ -156,6 +156,9 @@ class ExecutionEngine:
         events: EventRecorder,
         checkpoint_manager: Any | None = None,  # CheckpointManager, lazy import
         enable_reflection: bool = False,
+        workspace_dir: Path | None = None,
+        skill_registry=None,  # Phase 1: SkillRegistry
+        settings=None,  # Settings object (for add_allowed_path)
     ) -> None:
         self.model_gateway = model_gateway
         self.tool_registry = tool_registry
@@ -165,8 +168,12 @@ class ExecutionEngine:
         self.completion_checker = CompletionChecker()
         self._memory_manager = None  # lazy init from app
         self.checkpoint_manager = checkpoint_manager
-        self.context_compressor = ContextCompressor()
+        self.workspace_dir = workspace_dir or Path.cwd()
+        self.context_compressor = ContextCompressor(model_gateway=model_gateway)
         self._tool_fail_streak: dict[str, int] = {}  # cross-step tool failure tracking
+        self._current_thinking_mode: str = "disabled"  # set per-step before LLM call
+        self._skill_registry = skill_registry  # Phase 1
+        self._settings = settings  # For add_allowed_path on DENIED retry
 
         # v0.2: Reflection & ReAct
         from flowcraft_core.execution.reflection import ReflectionLoop
@@ -177,12 +184,21 @@ class ExecutionEngine:
             enable_reflection=enable_reflection,
         )
 
+        # Phase 2: Dynamic Script Executor (lazy init on first use)
+        self._dynamic_script_executor = None
+
     def _identity_block(self) -> str:
         """Build the agent identity section injected into every system prompt."""
         profile = getattr(self.model_gateway, '_profile', None)
         provider = self.model_gateway.provider_name
         model_id = profile.model_id if profile else "unknown"
         display = profile.display_name if profile else model_id
+
+        # Current date/time — critical for any task involving "today", "latest", etc.
+        now = datetime.now(timezone.utc)
+        now_str = now.strftime("%Y-%m-%d")
+        weekday = now.strftime("%A")
+        time_str = now.strftime("%H:%M UTC")
 
         # Summarize available tools by category
         tools = self.tool_registry.list_definitions()
@@ -196,9 +212,28 @@ class ExecutionEngine:
             f"You are FlowCraft Agent v0.1.0, running on **{display}** ({provider}).\n"
             f"When asked about your model/provider, ALWAYS answer: {display} by {provider}.\n"
             f"NEVER claim to be Claude, GPT, Gemini, or any other model.\n"
+            f"## TODAY'S DATE (CRITICAL)\n"
+            f"Current date: **{now_str}** ({weekday}), time: {time_str}.\n"
+            f"ALWAYS use this date for search queries, file names, and time-sensitive tasks.\n"
+            f"NEVER use training-data dates (e.g., 2024 or 2025) when searching for 'today' or 'latest'.\n"
             f"You operate on the user's local Windows machine with these tools:\n"
             f"{tool_summary}\n"
-            f"You can read/write files, browse the web, execute code, search knowledge, and run commands.\n"
+            f"**KEY CAPABILITIES**:\n"
+            f"- `exec`: Run shell commands (git, pip, python, npm, cargo, etc.). "
+            f"Use for: installing packages, running scripts AS FILES (NOT inline -c), "
+            f"git operations, building projects, running tests.\n"
+            f"- `apply_patch`: Structured multi-file code edits (create/update/delete/patch). "
+            f"Use for: making precise code changes with automatic backups.\n"
+            f"- `skill.execute`: Run pre-written deterministic scripts (data analysis, file ops, etc.).\n"
+            f"- `code.execute`: Execute Python in a SAFE sandbox (no file access, no network). "
+            f"Only for pure computation.\n"
+            f"- `file.read` / `file.write`: Read and write files.\n"
+            f"- `command.run`: Run system commands (legacy, prefer `exec`).\n"
+            f"**WHEN TO USE WHICH**:\n"
+            f"- Need to install packages or run a script file? → `exec`\n"
+            f"- Need to make precise code changes to files? → `apply_patch`\n"
+            f"- Need to do pure data analysis/computation? → `code.execute` (sandbox) or `skill.execute`\n"
+            f"- NEVER use `exec` with inline eval (python -c, node -e). Write to a file first, then execute.\n"
             f"You CANNOT: access the internet freely (tools only), remember between sessions (yet), "
             f"train/learn from interactions.\n"
         )
@@ -414,6 +449,31 @@ class ExecutionEngine:
 
         # CompletionChecker: 任务级完成判定
         final_output = "\n\n".join(step_outputs) if step_outputs else "(无文本输出)"
+
+        # Defense-in-depth: detect if critical generation steps only produced fallback/error
+        fallback_count = sum(
+            1 for out in step_outputs
+            if self._is_likely_fallback(out)
+        )
+        total_steps = len(step_outputs)
+        # If >50% of step outputs are fallback messages, the task didn't produce real work
+        if total_steps > 0 and fallback_count / total_steps > 0.5:
+            task.status = TaskStatus.FAILED
+            task.failed_reason = (
+                f"任务未能生成有效内容：{fallback_count}/{total_steps} 个步骤"
+                f"因LLM调用失败仅返回错误提示"
+            )
+            task.updated_at = now_utc()
+            self._event(task, "task.failed", "LLM调用失败导致任务无效",
+                         task.failed_reason,
+                         {"fallback_steps": fallback_count, "total_steps": total_steps},
+                         severity="ERROR")
+            remove_pause_controller(task.task_id)
+            trace.pipeline_end(tid, "execute_plan",
+                             f"任务失败: {task.failed_reason}",
+                             elapsed_s=_time.monotonic() - t0)
+            return task
+
         self._event(task, "task.completed", "任务已完成",
                      final_output,
                      {"steps_completed": len(plan.steps),
@@ -924,7 +984,23 @@ class ExecutionEngine:
         all_observations: list[ToolObservation] = list(prior_observations)
 
         trace.debug(tid, "_execute_step_once",
-                   f"步骤{step.index}开始, action_type={step.action_type}, max_rounds={self.MAX_TOOL_ROUNDS_PER_STEP}")
+                   f"步骤{step.index}开始, action_type={step.action_type}, execution_mode={getattr(step, 'execution_mode', 'tool')}, max_rounds={self.MAX_TOOL_ROUNDS_PER_STEP}")
+
+        # ── Phase 1-2: Execution Mode Routing ──────────────────
+        execution_mode = getattr(step, "execution_mode", "tool")
+
+        # Mode: skill — execute deterministic script directly (no LLM loop)
+        if execution_mode == "skill" and self._skill_registry:
+            skill_name = getattr(step, "skill_name", None)
+            skill_params = getattr(step, "skill_params", {})
+            if skill_name:
+                return await self._execute_skill_step(
+                    task, brief, step, skill_name, skill_params)
+
+        # Mode: dynamic_script — Mini ReAct: generate→check→execute→validate→retry
+        if execution_mode == "dynamic_script":
+            return await self._execute_dynamic_script_step(
+                task, brief, step, prior_step_outputs)
 
         # ── 死循环检测 (增强版) ──
         _last_tool = ""; _last_input_hash = 0; _last_status = ""
@@ -933,6 +1009,12 @@ class ExecutionEngine:
         _tool_fail_streak = self._tool_fail_streak
 
         round_times: list[float] = []
+
+        # ── Evaluate thinking mode for this step ────────────
+        from flowcraft_core.intent.thinking_evaluator import evaluate_step_thinking
+        self._current_thinking_mode = evaluate_step_thinking(step, getattr(brief, 'thinking_mode', 'disabled'))
+        trace.debug(tid, "_execute_step_once.thinking",
+                   f"步骤{step.index} thinking_mode={self._current_thinking_mode} (task={getattr(brief, 'thinking_mode', 'disabled')})")
 
         for round_idx in range(self.MAX_TOOL_ROUNDS_PER_STEP):
             round_t0 = _time.monotonic()
@@ -943,7 +1025,7 @@ class ExecutionEngine:
                        f"步骤{step.index} 轮次{round_idx+1}/{self.MAX_TOOL_ROUNDS_PER_STEP}")
 
             context = self._build_context(task, brief, step, all_observations, prior_step_outputs)
-            prompt = self._build_step_prompt(context, tools_def, round_idx)
+            prompt = self._build_step_prompt(context, tools_def, round_idx, step=step)
 
             trace.debug(tid, "_execute_step_once.context",
                        f"步骤{step.index} 上下文长度: {len(context)}字符, prompt长度: {len(prompt)}字符")
@@ -970,16 +1052,18 @@ class ExecutionEngine:
                           extra={"answer_len": len(answer_text), "round": round_idx})
 
                 # CompletionChecker: 验证输出质量
-                result = self.completion_checker.check_step(step, answer_text)
-                if result.needs_replan:
-                    self._event(task, "step.incomplete",
-                                f"步骤 {step.index} 输出质量不足",
-                                f"质量分: {result.quality_score:.2f}",
-                                {"step_index": step.index, "quality": result.quality_score})
-                    trace.warn(tid, "_execute_step_once.incomplete",
-                              f"步骤{step.index} 输出质量不足: score={result.quality_score:.2f}")
-                    if round_idx < self.MAX_TOOL_ROUNDS_PER_STEP - 1:
-                        continue  # 再给一次机会
+                # Skip quality re-loop for known fallback/error messages — retrying won't help
+                if not self._is_likely_fallback(answer_text):
+                    result = self.completion_checker.check_step(step, answer_text)
+                    if result.needs_replan:
+                        self._event(task, "step.incomplete",
+                                    f"步骤 {step.index} 输出质量不足",
+                                    f"质量分: {result.quality_score:.2f}",
+                                    {"step_index": step.index, "quality": result.quality_score})
+                        trace.warn(tid, "_execute_step_once.incomplete",
+                                  f"步骤{step.index} 输出质量不足: score={result.quality_score:.2f}")
+                        if round_idx < self.MAX_TOOL_ROUNDS_PER_STEP - 1:
+                            continue  # 再给一次机会
                 return last_observation, step_answer
 
             if action == "ask_user":
@@ -1114,7 +1198,28 @@ class ExecutionEngine:
                     continue
 
                 if observation.status == "DENIED":
-                    # 权限不足：直接生成授权请求，不依赖 LLM 判断
+                    # 权限不足 — 尝试自动授权路径，否则请求用户
+                    denied_path = observation.output_payload.get("denied_path", "")
+                    action = observation.output_payload.get("action", "")
+
+                    # Auto-grant: if denied_path is in workspace vicinity, auto-add
+                    if denied_path and self._settings:
+                        try:
+                            denied = Path(denied_path)
+                            if denied.exists() or denied.parent.exists():
+                                added = self._settings.add_allowed_path(
+                                    denied if denied.is_dir() else denied.parent)
+                                if added:
+                                    self._event(task, "permission.granted",
+                                                 f"Auto-granted access to: {denied.parent if denied.is_file() else denied}",
+                                                 f"Path added to allowed_paths",
+                                                 {"path": str(denied), "round": round_idx})
+                                    # Retry the tool immediately
+                                    continue
+                        except Exception:
+                            pass
+
+                    # If not auto-granted, ask user
                     self._event(task, "step.reasoning", "权限不足，请求用户授权",
                                  observation.output_summary, {"round": round_idx}, severity="WARN")
                     question = self._make_permission_request(
@@ -1134,6 +1239,151 @@ class ExecutionEngine:
         raise StepFailedError(
             FailureInfo(FailureType.STEP_LIMIT,
                         f"步骤超过最大工具调用轮数 ({self.MAX_TOOL_ROUNDS_PER_STEP})"))
+
+    # ══════════════════════════════════════════════════════════
+    # Phase 1: Skill Execution
+    # ══════════════════════════════════════════════════════════
+
+    async def _execute_skill_step(
+        self,
+        task: Task,
+        brief: TaskBrief,
+        step: PlanStep,
+        skill_name: str,
+        skill_params: dict,
+    ) -> tuple[ToolObservation | None, str]:
+        """Execute a deterministic skill script directly (no LLM loop).
+
+        Skills are pre-written, tested scripts — they run deterministically.
+        The agent context from SKILL.md is injected into the step context
+        for the LLM to understand the result, but no LLM decision loop is needed.
+        """
+        tid = task.task_id
+        self._event(task, "step.started",
+                     f"技能执行: {skill_name}",
+                     f"参数: {skill_params}",
+                     {"step_index": step.index, "skill": skill_name})
+
+        try:
+            # Resolve skill name (support qualified, category.name, and simple names)
+            manifest = self._skill_registry.resolve_skill(skill_name)
+            resolved_name = manifest.definition.qualified_name if manifest else skill_name
+
+            result = await self._skill_registry.execute_skill(
+                skill_name, params=skill_params)
+
+            if result.is_success:
+                # Get agent context for this skill to help LLM understand results
+                skill_context = self._skill_registry.get_agent_context(resolved_name) or ""
+                step_answer = (
+                    f"## 技能执行结果: {resolved_name}\n"
+                    f"耗时: {result.elapsed_seconds:.2f}s\n"
+                    f"状态: {result.status}\n\n"
+                    f"{result.output}\n\n"
+                )
+                if skill_context:
+                    step_answer += f"\n## 技能说明\n{skill_context[:1000]}"
+
+                self._event(task, "step.completed",
+                             f"技能完成: {resolved_name}",
+                             step_answer,
+                             {"step_index": step.index, "skill": resolved_name,
+                              "elapsed": result.elapsed_seconds})
+
+                return None, step_answer
+            else:
+                error_msg = result.error or "Skill execution failed"
+                self._event(task, "step.failed",
+                             f"技能失败: {resolved_name}",
+                             error_msg,
+                             {"step_index": step.index}, severity="ERROR")
+                return None, f"技能 {resolved_name} 执行失败: {error_msg}"
+
+        except Exception as exc:
+            self._event(task, "step.failed",
+                         f"技能异常: {skill_name}",
+                         str(exc),
+                         {"step_index": step.index}, severity="ERROR")
+            raise StepFailedError(
+                FailureInfo(FailureType.TOOL_ERROR,
+                            f"Skill {skill_name} failed: {exc}"))
+
+    # ══════════════════════════════════════════════════════════
+    # Phase 2: Dynamic Script Execution (Mini ReAct)
+    # ══════════════════════════════════════════════════════════
+
+    async def _execute_dynamic_script_step(
+        self,
+        task: Task,
+        brief: TaskBrief,
+        step: PlanStep,
+        prior_step_outputs: list[str] | None = None,
+    ) -> tuple[ToolObservation | None, str]:
+        """Execute a dynamic (LLM-generated) script with Mini ReAct loop.
+
+        Flow: LLM-generate → safety-check → sandbox-execute → validate → retry×3.
+        On success, the script is auto-saved as an agent_generated skill (Phase 3).
+        """
+        tid = task.task_id
+        self._event(task, "step.started",
+                     f"动态脚本执行: {step.title}",
+                     step.objective,
+                     {"step_index": step.index, "mode": "dynamic_script"})
+
+        # Lazy init DynamicScriptExecutor
+        if self._dynamic_script_executor is None:
+            from flowcraft_core.skills.dynamic_executor import DynamicScriptExecutor
+            self._dynamic_script_executor = DynamicScriptExecutor(
+                model_gateway=self.model_gateway,
+                skill_registry=self._skill_registry,
+            )
+
+        # Build prior context from completed steps
+        prior_context = ""
+        if prior_step_outputs:
+            prior_context = "\n".join(prior_step_outputs[-3:])
+
+        result = await self._dynamic_script_executor.execute(
+            task_id=task.task_id,
+            step_id=step.step_id,
+            step=step,
+            prior_context=prior_context,
+        )
+
+        if result.status == "SUCCESS":
+            step_answer = (
+                f"## 动态脚本执行结果\n"
+                f"尝试次数: {result.attempts}\n"
+                f"总耗时: {result.total_elapsed:.2f}s\n\n"
+                f"{result.output}\n"
+            )
+            if result.saved_as_skill:
+                step_answer += f"\n> 💡 此脚本已自动保存为技能: `{result.saved_as_skill}`，"
+                step_answer += "下次可直接使用 skill 模式执行。"
+
+            self._event(task, "step.completed",
+                         f"动态脚本完成: {step.title}",
+                         step_answer,
+                         {"step_index": step.index, "attempts": result.attempts,
+                          "elapsed": result.total_elapsed,
+                          "saved_as_skill": result.saved_as_skill})
+
+            return None, step_answer
+        else:
+            error_msg = result.error or "Dynamic script execution failed"
+            if result.status == "MAX_RETRIES":
+                error_msg = f"超过最大重试次数 ({result.attempts}次): {error_msg}"
+            elif result.status == "SAFETY_DENIED":
+                error_msg = f"安全策略拒绝: {error_msg}"
+
+            self._event(task, "step.failed",
+                         f"动态脚本失败: {step.title}",
+                         error_msg,
+                         {"step_index": step.index, "status": result.status},
+                         severity="ERROR")
+
+            raise StepFailedError(
+                FailureInfo(FailureType.TOOL_ERROR, error_msg))
 
     async def _llm_decide_with_retry(self, task: Task, prompt: str) -> dict[str, Any]:
         """LLM decision with MODEL_ERROR retry."""
@@ -1192,9 +1442,24 @@ class ExecutionEngine:
         except Exception:
             pass
 
+        # Adaptive timeout: larger prompts get more time
+        prompt_size = len(prompt)
+        if prompt_size > 8000:
+            llm_timeout = 90.0
+        elif prompt_size > 4000:
+            llm_timeout = 60.0
+        else:
+            llm_timeout = 45.0
+
+        # Output token budget: DeepSeek V4 Pro max_output_tokens = 384,000.
+        # Previously limited to 1024–8192, which caused JSON truncation for
+        # creative/writing steps where final_answer needs thousands of characters.
+        # This is a ceiling, not a target — the model only generates what it needs.
+        response_max_tokens = 384000  # DeepSeek V4 Pro max output
+
         t0 = _time.monotonic()
         trace.llm_call(tid_hint, "_llm_decide",
-                      f"LLM decision start (timeout=30s, max_tokens=2048, prompt_len={len(prompt)})")
+                      f"LLM decision start (timeout={llm_timeout}s, max_tokens={response_max_tokens}, prompt_len={prompt_size})")
 
         try:
             system_content = (
@@ -1217,14 +1482,15 @@ class ExecutionEngine:
                 {"role": "user", "content": prompt},
             ]
             trace.debug(tid_hint, "_llm_decide.call",
-                       f"Calling adapter.structured_chat, prompt_len={len(prompt)}")
+                       f"Calling adapter.structured_chat, prompt_len={prompt_size}, thinking={self._current_thinking_mode}")
 
             result = await _asyncio.wait_for(
                 self.model_gateway._adapter.structured_chat(
                     messages, STEP_DECISION_SCHEMA,
-                    temperature=0.1, max_tokens=2048,
+                    temperature=0.1, max_tokens=response_max_tokens,
+                    thinking={"type": self._current_thinking_mode},
                 ),
-                timeout=30.0,
+                timeout=llm_timeout,
             )
             elapsed = _time.monotonic() - t0
             trace.llm_result(tid_hint, "_llm_decide",
@@ -1234,21 +1500,17 @@ class ExecutionEngine:
         except _asyncio.TimeoutError:
             elapsed = _time.monotonic() - t0
             trace.llm_timeout(tid_hint, "_llm_decide",
-                            f"LLM decision timeout ({elapsed:.2f}s > 30s)! Using fallback",
+                            f"LLM decision timeout ({elapsed:.2f}s > {llm_timeout}s), propagating for retry",
                             elapsed_s=elapsed)
-            logger.warning("LLM decision timed out (30s)")
-            return {"action": "final_answer",
-                    "reasoning": "LLM response timeout, using fallback",
-                    "final_answer": self._dev_fallback(prompt)}
+            logger.warning("LLM decision timed out after %.1fs (prompt=%d chars)", elapsed, prompt_size)
+            raise  # Propagate → retry_with_backoff will retry, not swallow as success
         except Exception as exc:
             elapsed = _time.monotonic() - t0
             trace.error(tid_hint, "_llm_decide.error",
                        f"LLM decision failed ({elapsed:.2f}s): {type(exc).__name__}: {exc}",
                        elapsed_s=elapsed)
             logger.warning("LLM decision failed: %s", exc)
-            return {"action": "final_answer",
-                    "reasoning": f"LLM call failed, using fallback: {exc}",
-                    "final_answer": self._dev_fallback(prompt)}
+            raise  # Propagate → retry_with_backoff will retry, not swallow as success
 
     # -- Replanning --
 
@@ -1303,6 +1565,9 @@ Return in JSON format matching ExecutionPlan schema."""
                                     "expected_output": {"type": "string"},
                                     "risk_level": {"type": "string", "enum": ["LOW", "MEDIUM", "HIGH", "CRITICAL"]},
                                     "approval_required": {"type": "boolean"},
+                                    "execution_mode": {"type": "string", "enum": ["tool", "skill", "dynamic_script", "model_answer"], "description": "How this step should be executed"},
+                                    "skill_name": {"type": "string", "description": "Skill name for skill mode"},
+                                    "skill_params": {"type": "object", "description": "Parameters for skill script"},
                                 },
                                 "required": ["index", "title", "objective", "action_type", "expected_output", "risk_level"],
                             },
@@ -1312,7 +1577,12 @@ Return in JSON format matching ExecutionPlan schema."""
                 },
                 temperature=0.2, max_tokens=2048,
             )
-            steps = [PlanStep(**step) for step in result.get("steps", [])]
+            steps = []
+            for raw_step in result.get("steps", []):
+                raw_step.setdefault("execution_mode", "tool")
+                raw_step.setdefault("skill_name", None)
+                raw_step.setdefault("skill_params", {})
+                steps.append(PlanStep(**raw_step))
             return ExecutionPlan(
                 task_id=task.task_id,
                 mode=PlanMode(result.get("mode", "LINEAR")),
@@ -1343,7 +1613,8 @@ Return in JSON format matching ExecutionPlan schema."""
                     if base_dir:
                         resolved[key] = str(base_dir / p)
                     else:
-                        resolved[key] = str(Path.cwd() / p)
+                        # Resolve against workspace, not cwd (source dir)
+                        resolved[key] = str(self.workspace_dir / p)
 
         if tool_name == "file.read" and "path" in resolved:
             path_val = resolved["path"]
@@ -1418,7 +1689,10 @@ Return in JSON format matching ExecutionPlan schema."""
 
     # -- Prompt Building --
 
-    def _build_step_prompt(self, context: str, tools_def: str, round_idx: int) -> str:
+    def _build_step_prompt(
+        self, context: str, tools_def: str, round_idx: int,
+        step: PlanStep | None = None,
+    ) -> str:
         rules = ""
         if round_idx > 0:
             rules = """
@@ -1428,6 +1702,32 @@ Return in JSON format matching ExecutionPlan schema."""
 - **You must immediately use final_answer to summarize these results and complete the task.**
 - **DO NOT** call the same tool again - you already have the results!
 - **DO NOT** call tools to "get more info" - all content has been provided above.
+"""
+
+        # Large output strategy: for steps that need to generate substantial text
+        # (novels, reports, long code, etc.), route content through file tools
+        # instead of stuffing everything into the JSON final_answer field.
+        large_output_hint = ""
+        if step and step.action_type == "MODEL_ANSWER":
+            expected = step.expected_output or ""
+            objective = step.objective or ""
+            combined = (expected + objective).lower()
+            long_form_keywords = [
+                "小说", "文章", "报告", "novel", "article", "report",
+                "代码", "脚本", "code", "script",
+                "总结", "摘要", "summary",
+                "万字", "千字", "字以", "words", "characters",
+            ]
+            is_long_form = any(kw in combined for kw in long_form_keywords)
+            if is_long_form:
+                large_output_hint = """
+## LARGE OUTPUT STRATEGY (critical for this step)
+This step requires generating a large amount of text that may exceed the JSON response limit.
+**IMPORTANT — do NOT try to put all content in final_answer.** Instead:
+1. Use **file.write** or **file.append** to save the FULL content to a file (e.g., `novel_output.md`)
+2. Then use **final_answer** to give ONLY a brief summary (2-3 sentences) + the file path
+3. The user will read the complete content from the saved file
+4. Each file.write call can handle large content — break into multiple calls if needed
 """
 
         # Inject blocked tools into context so LLM avoids them
@@ -1446,6 +1746,7 @@ Return in JSON format matching ExecutionPlan schema."""
 
 ## Available Tools
 {tools_def}
+{large_output_hint}
 {blocked_tools}
 {rules}
 ## Decision
@@ -1489,25 +1790,32 @@ Note: 'reasoning' is your internal thought, 'final_answer' is user-facing output
 
         prior_text = ""
         if previous_step_outputs:
-            prior_text = "## Completed step outputs\n" + "\n".join(
-                f"### {s[:200]}" for s in previous_step_outputs[-5:]
+            # 保留完整的前序步骤输出，交给 smart_truncate 按优先级智能压缩
+            prior_text = "## 已完成步骤的输出\n" + "\n".join(
+                f"### 步骤 {i+1}\n{s}" for i, s in enumerate(previous_step_outputs[-8:])
             )
+
+        # Always inject current date into context for time-sensitive steps
+        now = datetime.now(timezone.utc)
+        date_line = f"**Current date: {now.strftime('%Y-%m-%d')} ({now.strftime('%A')})**"
 
         parts = [
             session_context,
             self._build_memory_context(task, brief, previous_observations),
+            date_line,
             prior_text,
             compressed.context_text,
         ]
 
         context = "\n".join(p for p in parts if p)
 
-        if len(context) > 12000:
+        from flowcraft_core.memory.context_summarizer import smart_truncate, get_context_budget
+        budget = get_context_budget(self.model_gateway)
+        if len(context) > budget:
             try:
-                from flowcraft_core.memory.context_summarizer import smart_truncate
-                context = smart_truncate(context, max_chars=12000)
+                context = smart_truncate(context, max_chars=budget)
             except Exception:
-                context = context[:12000] + "\n\n[...truncated]"
+                context = context[:budget] + "\n\n[...truncated]"
         return context
 
     # -- Helpers --
@@ -1535,13 +1843,46 @@ Note: 'reasoning' is your internal thought, 'final_answer' is user-facing output
         return False
 
     def _dev_fallback(self, prompt: str) -> str:
-        """Dev mode fallback response."""
-        prompt_lower = prompt.lower()
-        if "file" in prompt_lower and ("read" in prompt_lower or "reading" in prompt_lower):
-            return "Dev mode: file content simulated."
-        if "command" in prompt_lower:
-            return "Dev mode: command simulated."
-        return "FlowCraft dev mode: step simulated. Connect a real model for full responses."
+        """Fallback response when LLM is unavailable or fails.
+
+        Only checks the TASK OBJECTIVE portion of the prompt, not the
+        tools definition section (which always contains 'file.read' etc.).
+        """
+        # Extract just the task context (before "## Available Tools")
+        task_section = prompt.split("## Available Tools")[0] if "## Available Tools" in prompt else prompt
+        task_lower = task_section.lower()
+
+        # Check if the actual task involves file operations (not tool definitions)
+        has_file_task = (
+            ("file" in task_lower and ("read" in task_lower or "reading" in task_lower or "write" in task_lower))
+            or "读取" in task_section or "写入" in task_section or "文件" in task_section
+            or "保存" in task_section
+        )
+
+        if has_file_task:
+            return (
+                "⚠️ LLM 调用失败（超时或网络问题），当前步骤涉及文件操作。\n"
+                "请检查：1) 网络连接 2) API 额度 3) 尝试切换 DeepSeek V4 Flash"
+            )
+        return (
+            "⚠️ LLM 调用失败（超时或网络问题）。\n"
+            "常见原因：网络延迟高、API 限流、或 prompt 过大导致超时。\n"
+            "建议：1) 检查网络 2) 在设置页切换为 DeepSeek V4 Flash 3) 简化任务描述"
+        )
+
+    @staticmethod
+    def _is_likely_fallback(text: str) -> bool:
+        """Check if text is a dev fallback / LLM error message.
+
+        These messages are produced when the LLM is unavailable; retrying
+        the same step won't produce better results.
+        """
+        fallback_markers = [
+            "⚠️ LLM 调用失败",
+            "LLM response timeout",
+            "LLM call failed",
+        ]
+        return any(marker in text for marker in fallback_markers)
 
     @staticmethod
     def _sanitize_output(text: str) -> str:

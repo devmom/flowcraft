@@ -70,6 +70,11 @@ coverage.xml
 tmp-*
 *_bak*
 *-bak*
+_gen.py
+_gen_skills.py
+_write_changelog.py
+_write_compare_part2.py
+convert_openclaw_skills.py
 
 # ── Node (if web UI added later) ──
 node_modules/

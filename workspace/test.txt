@@ -1,6 +1,0 @@
-Hello World! This is a test file.
-这是一个测试文件，用于统计字数。
-Python is a great programming language.
-人工智能正在改变世界。
-Let's count the words in this file.
-中英文混合测试文本。

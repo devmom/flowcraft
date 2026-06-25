@@ -37,6 +37,12 @@ config/api_key.txt
 
 # ── Design docs & research (not for distribution) ──
 TechnicalArchitecture/
+ProductDesign/
+
+# ── User workspace & temp analysis files ──
+workspace/*
+!workspace/.gitkeep
+workflow_analysis.txt
 
 # ── Build artifacts ──
 release/
